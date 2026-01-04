@@ -4,6 +4,10 @@
 
 Instead of junior associates manually scrolling through hundreds of pages to find, extract, and sort signature pages, **Signature Packet IDE** uses computer vision and LLMs to identify, tag, and organize them in seconds.
 
+## Demo
+
+https://github.com/user-attachments/assets/1b2ab8e4-0129-4319-aa13-05d31d714266
+
 ## Features
 
 - **AI-Powered Extraction**: Uses Google Gemini 2.5 Flash to visually identify signature pages and extract:
