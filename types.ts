@@ -1,9 +1,11 @@
 export interface ProcessedDocument {
   id: string;
   name: string;
-  file: File;
+  file: File | null; // null when restored from config (awaiting re-upload)
   pageCount: number;
-  status: 'pending' | 'processing' | 'completed' | 'error';
+  status: 'pending' | 'processing' | 'completed' | 'error' | 'restored';
+  wasRestored?: boolean; // true if this doc came from a saved config and needs merge-rescan
+  savedPages?: ExtractedSignaturePage[]; // holds the saved pages during rescan so they survive state clearing
   progress?: number; // 0 to 100
   extractedPages: ExtractedSignaturePage[];
 }
@@ -24,6 +26,18 @@ export interface ExtractedSignaturePage {
 }
 
 export type GroupingMode = 'agreement' | 'counterparty' | 'signatory';
+
+export interface SavedConfiguration {
+  version: 1;
+  savedAt: string;
+  groupingMode: GroupingMode;
+  documents: Array<{
+    id: string;
+    name: string;
+    pageCount: number;
+  }>;
+  extractedPages: ExtractedSignaturePage[];
+}
 
 export interface SignatureBlockExtraction {
   isSignaturePage: boolean;

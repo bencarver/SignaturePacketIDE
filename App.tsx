@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from 'react';
-import { UploadCloud, File as FileIcon, Loader2, Download, Layers, Users, X, CheckCircle2, FileText, Eye, UserPen } from 'lucide-react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { UploadCloud, File as FileIcon, Loader2, Download, Layers, Users, X, CheckCircle2, FileText, Eye, UserPen, Save, FolderOpen, AlertTriangle } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import JSZip from 'jszip';
-import { ExtractedSignaturePage, GroupingMode, ProcessedDocument } from './types';
+import { ExtractedSignaturePage, GroupingMode, ProcessedDocument, SavedConfiguration } from './types';
 import { getPageCount, renderPageToImage, generateGroupedPdfs, findSignaturePageCandidates, extractSinglePagePdf } from './services/pdfService';
 import { analyzePage } from './services/geminiService';
 import SignatureCard from './components/SignatureCard';
@@ -33,40 +33,70 @@ const App: React.FC = () => {
   // Instructions Modal State
   const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
 
+  // Ref for load-config hidden file input
+  const loadConfigInputRef = useRef<HTMLInputElement>(null);
+
+  // Route newly-pending documents: restored ones → rescan+merge, new ones → normal extract button
+  // Using a ref to prevent double-firing in StrictMode
+  const pendingRescanIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const restoredPending = documents.filter(
+      d => d.status === 'pending' && d.wasRestored && d.file && !pendingRescanIds.current.has(d.id)
+    );
+    if (restoredPending.length === 0) return;
+
+    restoredPending.forEach(d => pendingRescanIds.current.add(d.id));
+    processRestoredDocuments(restoredPending);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents]);
+
   // --- Handlers ---
 
   const handleFileUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
 
-    // Check for API Key
-    if (!process.env.API_KEY) {
-        alert("API_KEY is missing from environment. Please provide a valid key.");
-        return;
-    }
+    const uploadedFiles = Array.from(files);
 
-    const newDocs: ProcessedDocument[] = Array.from(files).map(f => {
-        // Validation: Strict PDF Check
+    // Compute next state outside the setter so it only runs once (avoids StrictMode double-invoke)
+    setDocuments(prev => {
+      const updatedDocs = [...prev];
+      const newDocs: ProcessedDocument[] = [];
+
+      for (const f of uploadedFiles) {
         const isPdf = f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf');
-        
-        return {
+
+        // Check if this file matches a restored document by name
+        const restoredIdx = updatedDocs.findIndex(d => d.status === 'restored' && d.name === f.name);
+
+        if (restoredIdx !== -1) {
+          // Attach the file; snapshot savedPages now before we clear them; rescan triggered via useEffect
+          updatedDocs[restoredIdx] = {
+            ...updatedDocs[restoredIdx],
+            file: f,
+            status: 'pending',
+            wasRestored: true,
+            savedPages: updatedDocs[restoredIdx].extractedPages,
+          };
+        } else {
+          // Brand new file
+          newDocs.push({
             id: uuidv4(),
             name: f.name,
             file: f,
             pageCount: 0,
             status: isPdf ? 'pending' : 'error',
-            extractedPages: []
-        };
-    });
+            extractedPages: [],
+          });
+        }
+      }
 
-    setDocuments(prev => [...prev, ...newDocs]);
-    
-    // Process all valid pending docs immediately
-    // const validDocsToProcess = newDocs.filter(d => d.status === 'pending');
-    // processAllDocuments(validDocsToProcess);
+      return [...updatedDocs, ...newDocs];
+    });
   };
 
   const handleProcessPending = () => {
-    const pendingDocs = documents.filter(d => d.status === 'pending');
+    // Only process truly new pending docs — restored ones auto-rescan via useEffect
+    const pendingDocs = documents.filter(d => d.status === 'pending' && d.file !== null && !d.wasRestored);
     processAllDocuments(pendingDocs);
   };
 
@@ -75,7 +105,7 @@ const App: React.FC = () => {
    */
   const processAllDocuments = async (docsToProcess: ProcessedDocument[]) => {
     if (docsToProcess.length === 0) return;
-    
+
     setIsProcessing(true);
     setCurrentStatus(`Processing ${docsToProcess.length} documents...`);
 
@@ -86,7 +116,122 @@ const App: React.FC = () => {
     setCurrentStatus('');
   };
 
+  /**
+   * Re-scan restored documents and merge fresh extraction with saved user edits.
+   * Saved edits (partyName, signatoryName, capacity, copies) are preserved for
+   * pages that still appear in the re-scan (matched by pageIndex).
+   */
+  const processRestoredDocuments = async (restoredDocs: ProcessedDocument[]) => {
+    if (restoredDocs.length === 0) return;
+
+    if (!process.env.API_KEY) {
+      alert("API_KEY is missing from environment. Cannot re-scan documents.");
+      return;
+    }
+
+    setIsProcessing(true);
+    setCurrentStatus(`Re-scanning ${restoredDocs.length} restored document${restoredDocs.length > 1 ? 's' : ''}...`);
+
+    await Promise.all(restoredDocs.map(doc => processSingleDocumentWithMerge(doc)));
+
+    setIsProcessing(false);
+    setCurrentStatus('');
+  };
+
+  /**
+   * Like processSingleDocument but merges result with previously-saved page edits.
+   */
+  const processSingleDocumentWithMerge = async (doc: ProcessedDocument) => {
+    // savedPages was snapshotted onto the doc object at upload time, before we clear extractedPages
+    const savedPages: ExtractedSignaturePage[] = doc.savedPages ?? doc.extractedPages;
+
+    setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'processing', progress: 0, extractedPages: [], savedPages: undefined } : d));
+
+    try {
+      const file = doc.file!;
+      const pageCount = await getPageCount(file);
+
+      const candidateIndices = await findSignaturePageCandidates(file, (curr, total) => {
+        const progress = Math.round((curr / total) * 30);
+        setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress } : d));
+      });
+
+      const freshPages: ExtractedSignaturePage[] = [];
+
+      if (candidateIndices.length > 0) {
+        let processedCount = 0;
+        const totalCandidates = candidateIndices.length;
+
+        for (let i = 0; i < candidateIndices.length; i += CONCURRENT_AI_REQUESTS_PER_DOC) {
+          const chunk = candidateIndices.slice(i, i + CONCURRENT_AI_REQUESTS_PER_DOC);
+
+          const chunkPromises = chunk.map(async (pageIndex) => {
+            try {
+              const { dataUrl, width, height } = await renderPageToImage(file, pageIndex);
+              const analysis = await analyzePage(dataUrl);
+
+              if (analysis.isSignaturePage) {
+                return analysis.signatures.map(sig => {
+                  // Find a saved page at the same pageIndex to merge edits from
+                  const saved = savedPages.find(sp => sp.pageIndex === pageIndex);
+                  return {
+                    id: saved?.id ?? uuidv4(),
+                    documentId: doc.id,
+                    documentName: doc.name,
+                    pageIndex,
+                    pageNumber: pageIndex + 1,
+                    // Prefer saved user edits; fall back to fresh AI extraction
+                    partyName: saved?.partyName ?? sig.partyName ?? 'Unknown Party',
+                    signatoryName: saved?.signatoryName ?? sig.signatoryName ?? '',
+                    capacity: saved?.capacity ?? sig.capacity ?? 'Signatory',
+                    copies: saved?.copies ?? 1,
+                    // Always use the freshly rendered thumbnail
+                    thumbnailUrl: dataUrl,
+                    originalWidth: width,
+                    originalHeight: height,
+                  };
+                });
+              }
+            } catch (err) {
+              console.error(`Error re-scanning page ${pageIndex} of ${doc.name}`, err);
+            }
+            return [];
+          });
+
+          const chunkResults = await Promise.all(chunkPromises);
+
+          processedCount += chunk.length;
+          const aiProgress = 30 + Math.round((processedCount / totalCandidates) * 70);
+          setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: aiProgress } : d));
+
+          chunkResults.flat().forEach(p => { if (p) freshPages.push(p); });
+        }
+      }
+
+      setDocuments(prev => prev.map(d => d.id === doc.id ? {
+        ...d,
+        status: 'completed',
+        progress: 100,
+        pageCount,
+        extractedPages: freshPages,
+        wasRestored: undefined,
+        savedPages: undefined,
+      } : d));
+
+      pendingRescanIds.current.delete(doc.id);
+      setCurrentStatus(`Re-scanned '${doc.name}' — edits preserved`);
+      setTimeout(() => setCurrentStatus(''), 3000);
+
+    } catch (error) {
+      console.error(`Error re-scanning ${doc.name}`, error);
+      pendingRescanIds.current.delete(doc.id);
+      setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'error', wasRestored: undefined, savedPages: undefined } : d));
+    }
+  };
+
   const processSingleDocument = async (doc: ProcessedDocument) => {
+      if (!doc.file) return; // Safety guard — should not happen for normal pending docs
+
       // Update status to processing
       setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'processing', progress: 0 } : d));
 
@@ -208,6 +353,75 @@ const App: React.FC = () => {
     setDocuments(prev => prev.filter(d => d.id !== docId));
   };
 
+  // --- Save / Load Configuration ---
+
+  const handleSaveConfiguration = () => {
+    const pages = documents.flatMap(d => d.extractedPages);
+    if (pages.length === 0) return;
+
+    const config: SavedConfiguration = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      groupingMode,
+      documents: documents.map(({ id, name, pageCount }) => ({ id, name, pageCount })),
+      extractedPages: pages,
+    };
+
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `SignatureConfig_${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const handleLoadConfiguration = (file: File | null) => {
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const raw = e.target?.result as string;
+        const config = JSON.parse(raw) as SavedConfiguration;
+
+        // Basic validation
+        if (config.version !== 1 || !Array.isArray(config.documents) || !Array.isArray(config.extractedPages)) {
+          alert('Invalid configuration file.');
+          return;
+        }
+
+        // Build restored documents, distributing extractedPages back by documentId
+        const pagesByDocId = new Map<string, ExtractedSignaturePage[]>();
+        for (const page of config.extractedPages) {
+          const arr = pagesByDocId.get(page.documentId) ?? [];
+          arr.push(page);
+          pagesByDocId.set(page.documentId, arr);
+        }
+
+        const restoredDocs: ProcessedDocument[] = config.documents.map(d => ({
+          id: d.id,
+          name: d.name,
+          file: null,
+          pageCount: d.pageCount,
+          status: 'restored',
+          extractedPages: pagesByDocId.get(d.id) ?? [],
+        }));
+
+        setDocuments(restoredDocs);
+        setGroupingMode(config.groupingMode);
+        setCurrentStatus('Configuration loaded — re-upload PDFs to enable pack download');
+        setTimeout(() => setCurrentStatus(''), 4000);
+      } catch {
+        alert('Could not read configuration file. Make sure it is a valid Signature Packet IDE JSON.');
+      }
+    };
+    reader.readAsText(file);
+
+    // Reset so the same file can be re-loaded later
+    if (loadConfigInputRef.current) loadConfigInputRef.current.value = '';
+  };
+
   // --- Preview Logic ---
 
   const openPreview = (url: string, title: string) => {
@@ -222,7 +436,7 @@ const App: React.FC = () => {
   };
 
   const handlePreviewDocument = async (doc: ProcessedDocument) => {
-    if (doc.status === 'error') return; // Don't preview errored files
+    if (doc.status === 'error' || doc.status === 'restored' || !doc.file) return;
     const url = URL.createObjectURL(doc.file);
     openPreview(url, doc.name);
   };
@@ -230,7 +444,7 @@ const App: React.FC = () => {
   const handlePreviewSignaturePage = async (page: ExtractedSignaturePage) => {
     // Find the original document file
     const parentDoc = documents.find(d => d.id === page.documentId);
-    if (!parentDoc) return;
+    if (!parentDoc || !parentDoc.file) return;
 
     try {
       const pdfBytes = await extractSinglePagePdf(parentDoc.file, page.pageIndex);
@@ -368,6 +582,32 @@ const App: React.FC = () => {
                <span>{documents.length} Docs</span>
                <span>{allPages.length} Sig Pages Found</span>
              </div>
+             {/* Save / Load Config */}
+             <div className="flex items-center gap-2">
+               <input
+                 ref={loadConfigInputRef}
+                 type="file"
+                 accept=".json"
+                 className="hidden"
+                 id="loadConfigInput"
+                 onChange={(e) => handleLoadConfiguration(e.target.files?.[0] ?? null)}
+               />
+               <button
+                 onClick={() => loadConfigInputRef.current?.click()}
+                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                 title="Load a previously saved configuration"
+               >
+                 <FolderOpen size={13} /> Load Config
+               </button>
+               <button
+                 onClick={handleSaveConfiguration}
+                 disabled={allPages.length === 0}
+                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-md transition-colors"
+                 title="Save current configuration as JSON"
+               >
+                 <Save size={13} /> Save Config
+               </button>
+             </div>
         </div>
       </header>
 
@@ -414,43 +654,63 @@ const App: React.FC = () => {
 
           <div className="flex-1 overflow-y-auto p-2 space-y-2">
              {documents.map(doc => (
-               <div key={doc.id} className={`group relative flex items-center gap-3 p-3 rounded-md border transition-all ${doc.status === 'error' ? 'bg-red-50 border-red-100' : 'hover:bg-slate-50 border-transparent hover:border-slate-100'}`}>
-                  <div className={`p-2 rounded text-slate-500 ${doc.status === 'error' ? 'bg-red-100 text-red-500' : 'bg-slate-100'}`}>
+               <div key={doc.id} className={`group relative flex items-center gap-3 p-3 rounded-md border transition-all ${
+                 doc.status === 'error' ? 'bg-red-50 border-red-100' :
+                 doc.status === 'restored' ? 'bg-amber-50 border-amber-100' :
+                 'hover:bg-slate-50 border-transparent hover:border-slate-100'
+               }`}>
+                  <div className={`p-2 rounded text-slate-500 ${
+                    doc.status === 'error' ? 'bg-red-100 text-red-500' :
+                    doc.status === 'restored' ? 'bg-amber-100 text-amber-600' :
+                    'bg-slate-100'
+                  }`}>
                      <FileIcon size={16} />
                   </div>
                   <div className="flex-1 min-w-0">
-                     <p className={`text-sm font-medium truncate ${doc.status === 'error' ? 'text-red-700' : 'text-slate-700'}`} title={doc.name}>{doc.name}</p>
+                     <p className={`text-sm font-medium truncate ${
+                       doc.status === 'error' ? 'text-red-700' :
+                       doc.status === 'restored' ? 'text-amber-800' :
+                       'text-slate-700'
+                     }`} title={doc.name}>{doc.name}</p>
                      <div className="text-xs text-slate-500 flex flex-col gap-1">
                         <div className="flex items-center gap-1">
                           {doc.status === 'processing' && <><Loader2 size={10} className="animate-spin" /> Processing...</>}
                           {doc.status === 'completed' && <><CheckCircle2 size={10} className="text-green-500" /> {doc.extractedPages.length} sig pages</>}
                           {doc.status === 'error' && <span className="text-red-500">PDF only</span>}
                           {doc.status === 'pending' && 'Queued'}
+                          {doc.status === 'restored' && (
+                            <span className="flex items-center gap-1 text-amber-600" title="Re-upload this PDF to enable pack download and re-scan for changes">
+                              <AlertTriangle size={10} /> Needs file
+                            </span>
+                          )}
                         </div>
+                        {doc.status === 'restored' && (
+                          <span className="text-amber-500 text-xs">{doc.extractedPages.length} sig pages (saved)</span>
+                        )}
                         {doc.status === 'processing' && doc.progress !== undefined && (
                           <div className="w-full bg-slate-200 rounded-full h-1.5 mt-1">
-                            <div 
-                              className="bg-blue-500 h-1.5 rounded-full transition-all duration-300" 
+                            <div
+                              className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
                               style={{ width: `${doc.progress}%` }}
                             ></div>
                           </div>
                         )}
                      </div>
                   </div>
-                  
+
                   {/* Document Actions */}
                   <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                    {doc.status !== 'error' && (
-                        <button 
-                        onClick={() => handlePreviewDocument(doc)} 
+                    {doc.status !== 'error' && doc.status !== 'restored' && (
+                        <button
+                        onClick={() => handlePreviewDocument(doc)}
                         className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-blue-500 transition-all mr-1"
                         title="Preview Document"
                         >
                         <Eye size={14} />
                         </button>
                     )}
-                    <button 
-                      onClick={() => removeDocument(doc.id)} 
+                    <button
+                      onClick={() => removeDocument(doc.id)}
                       className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-red-500 transition-all"
                       title="Remove Document"
                     >
