@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { SignatureBlockExtraction } from "../types";
+import { SignatureBlockExtraction, ExecutedPageExtraction } from "../types";
 
 const SYSTEM_INSTRUCTION = `
 You are a specialized legal AI assistant for transaction lawyers.
@@ -41,12 +41,57 @@ Title: Director
 \`\`\`
 → partyName: "Acme Corp", signatoryName: "Jane Smith", capacity: "Director"
 
+### MULTI-LEVEL ENTITY SIGNATURE BLOCKS (funds, LPs, trusts)
+Many entities sign through a chain of intermediaries. The pattern looks like:
+
+\`\`\`
+[ROLE LABEL] (if an entity):
+Name of [Role]: [Top-Level Entity], L.P.
+By: [Intermediate Entity], L.L.C., its general partner
+  By: ______________________________
+  Name: [Individual Name]
+  Title: [Title]
+\`\`\`
+
+Rules for multi-level entities:
+- The PARTY is always the TOP-LEVEL named entity (the fund, LP, or trust — e.g. "[Fund] IX, L.P.")
+- The SIGNATORY is always the INDIVIDUAL PERSON who physically signs (the innermost "Name:" line)
+- The CAPACITY should describe the signing chain, e.g. "Member of [GP Entity], L.L.C., its General Partner"
+- The role label before the block (e.g. "HOLDER", "INVESTOR") is NOT the party name — it goes in capacity if relevant
+- Look for "Name of Holder:", "Name of Investor:", etc. as the source of the party name
+- Intermediate entities (the "By: [Entity], its general partner" lines) are NOT the party — they are part of the signing authority chain
+
+Example:
+\`\`\`
+HOLDER (if an entity):
+Name of Holder: Sequoia Capital Fund XV, L.P.
+By: SC XV Management, L.L.C., its general partner
+  By: ______________________________
+  Name: Jane Smith
+  Title: Managing Member
+\`\`\`
+→ partyName: "Sequoia Capital Fund XV, L.P.", signatoryName: "Jane Smith", capacity: "Managing Member of SC XV Management, L.L.C., its General Partner"
+
+Example with deeper nesting:
+\`\`\`
+INVESTOR:
+Name of Investor: Acme Growth Partners III, L.P.
+By: Acme Growth GP III, L.L.C., its general partner
+By: Acme Capital Holdings, Inc., its managing member
+  By: ______________________________
+  Name: John Doe
+  Title: President
+\`\`\`
+→ partyName: "Acme Growth Partners III, L.P.", signatoryName: "John Doe", capacity: "President of Acme Capital Holdings, Inc."
+
 ### RULES
 1. If this is a signature page, set isSignaturePage to true.
 2. Extract ALL signature blocks found on the page.
 3. For each block, strictly separate the **Party Name** (Entity or Individual), **Signatory Name** (Human), and **Capacity** (Title/Role).
-4. If a field is blank (e.g. "Name: _______"), leave the extracted value as empty string.
-5. If it is NOT a signature page (e.g. text clauses only), set isSignaturePage to false.
+4. When you see nested "By:" lines, always trace to the TOP-LEVEL entity for partyName and the BOTTOM-LEVEL individual for signatoryName.
+5. Look for "Name of [Role]:" patterns (e.g. "Name of Holder:", "Name of Investor:") as a reliable indicator of the top-level party name.
+6. If a field is blank (e.g. "Name: _______"), leave the extracted value as empty string.
+7. If it is NOT a signature page (e.g. text clauses only), set isSignaturePage to false.
 `;
 
 const RESPONSE_SCHEMA: Schema = {
@@ -63,15 +108,15 @@ const RESPONSE_SCHEMA: Schema = {
         properties: {
           partyName: {
             type: Type.STRING,
-            description: "The legal entity or individual who is a party to the contract. For companies: the company name. For individuals: the person's actual name (e.g. 'John Smith'), NOT their role label (e.g. NOT 'Key Holder' or 'Founder')."
+            description: "The legal entity or individual who is a party to the contract. For companies: the company name. For multi-level entities (LPs, funds): the TOP-LEVEL entity name from 'Name of Holder/Investor:' lines, NOT intermediate entities. For individuals: the person's actual name (e.g. 'John Smith'), NOT their role label (e.g. NOT 'Key Holder' or 'Founder')."
           },
           signatoryName: {
              type: Type.STRING,
-             description: "The human name of the person physically signing. For individuals signing personally, this is the same as partyName. Never use a company name here."
+             description: "The human name of the person physically signing. For multi-level entity chains, this is the individual at the bottom of the 'By:' chain. For individuals signing personally, this is the same as partyName. Never use a company name here."
           },
           capacity: {
             type: Type.STRING,
-            description: "The title or role of the signatory. For company signatories: 'Director', 'CEO', etc. For individuals signing personally: use their block label, e.g. 'Key Holder', 'Founder', 'Guarantor'."
+            description: "The title or role of the signatory. For multi-level entity chains, include the signing authority context (e.g. 'Managing Member of [GP], its General Partner'). For company signatories: 'Director', 'CEO', etc. For individuals signing personally: use their block label, e.g. 'Key Holder', 'Founder', 'Guarantor'."
           }
         }
       }
@@ -80,6 +125,9 @@ const RESPONSE_SCHEMA: Schema = {
   required: ["isSignaturePage", "signatures"]
 };
 
+const needsRetry = (signatures: Array<{ partyName: string; signatoryName: string; capacity: string }>): boolean =>
+  signatures.some(s => !s.partyName || !s.signatoryName);
+
 export const analyzePage = async (
   base64Image: string,
   modelName: string = 'gemini-2.5-flash'
@@ -87,22 +135,14 @@ export const analyzePage = async (
   // Remove data:image/jpeg;base64, prefix if present
   const cleanBase64 = base64Image.split(',')[1];
 
-  try {
+  const callAI = async (promptText: string): Promise<SignatureBlockExtraction> => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    
     const response = await ai.models.generateContent({
       model: modelName,
       contents: {
         parts: [
-          {
-            inlineData: {
-              mimeType: 'image/jpeg',
-              data: cleanBase64
-            }
-          },
-          {
-            text: "Analyze this page. Is it a signature page? Extract the Party, Signatory, and Capacity according to the definitions."
-          }
+          { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
+          { text: promptText }
         ]
       },
       config: {
@@ -111,18 +151,221 @@ export const analyzePage = async (
         responseSchema: RESPONSE_SCHEMA
       }
     });
-
     const text = response.text;
     if (!text) throw new Error("No response from AI");
-
     return JSON.parse(text) as SignatureBlockExtraction;
+  };
+
+  try {
+    const result = await callAI(
+      "Analyze this page. Is it a signature page? Extract the Party, Signatory, and Capacity according to the definitions."
+    );
+
+    // Log raw result for debugging
+    if (result.isSignaturePage) {
+      console.log("[analyzePage] Raw extraction:", JSON.stringify(result.signatures, null, 2));
+    }
+
+    // Retry with a more forceful prompt if any block is missing party or signatory
+    if (result.isSignaturePage && needsRetry(result.signatures)) {
+      console.warn("[analyzePage] Missing party/signatory — retrying with enhanced prompt. Problematic blocks:",
+        result.signatures.filter(s => !s.partyName || !s.signatoryName));
+      try {
+        const retry = await callAI(
+          "IMPORTANT: One or more signature blocks on this page returned an empty partyName or signatoryName. " +
+          "Look very carefully at the FULL signature block structure. " +
+          "If you see a pattern like 'Name of Holder: [Fund Name]' or 'Name of Investor: [Fund Name]', " +
+          "that IS the partyName — use it even if it's a long entity name with L.P., L.L.C., etc. " +
+          "Trace all nested 'By:' lines to find the individual's name at the bottom — that is the signatoryName. " +
+          "Re-extract ALL signature blocks, ensuring partyName and signatoryName are never empty."
+        );
+        console.log("[analyzePage] Retry result:", JSON.stringify(retry.signatures, null, 2));
+        if (retry.isSignaturePage && retry.signatures.length > 0) {
+          return retry;
+        }
+      } catch (retryErr) {
+        console.error("analyzePage retry failed:", retryErr);
+      }
+    }
+
+    return result;
 
   } catch (error) {
     console.error("Gemini Analysis Error:", error);
-    // Fallback safe return
-    return {
-      isSignaturePage: false,
-      signatures: []
-    };
+    return { isSignaturePage: false, signatures: [] };
+  }
+};
+
+// --- Executed (Signed) Page Analysis ---
+
+const EXECUTED_PAGE_SYSTEM_INSTRUCTION = `
+You are a specialized legal AI assistant for transaction lawyers.
+Your task is to analyze an image of an EXECUTED (signed) signature page from a legal document.
+
+### YOUR TASK
+1. Determine if this page contains an actual signature (handwritten ink, electronic signature, DocuSign stamp, or similar).
+2. Extract the following information:
+
+**documentName**: The name of the agreement/contract this signature page belongs to.
+- Look for text like "Signature Page to [Agreement Name]" or "[Signature Page]" headers/footers.
+- Look for running headers, footers, or watermarks that reference the agreement name.
+- Common patterns: "Signature Page to Amended and Restated Investors' Rights Agreement"
+- If you find it, extract ONLY the agreement name (e.g. "Amended and Restated Investors' Rights Agreement"), not the "Signature Page to" prefix.
+- If you cannot determine the document name, return an empty string.
+
+**partyName**: The legal entity or individual who signed.
+- Apply the same rules as for blank pages: company name for companies, individual's actual name for individuals.
+- NEVER use role labels ("Key Holder", "Founder") as the party name.
+- For multi-level entities (LPs, funds, trusts): use the TOP-LEVEL entity name from "Name of Holder/Investor:" lines, NOT intermediate entities.
+
+**signatoryName**: The human being who physically signed.
+- For individuals signing personally, this is the same as partyName.
+- For multi-level entity chains, this is the individual at the bottom of the "By:" chain.
+
+**capacity**: The role/title of the signatory.
+- For individuals signing personally, use their role label (e.g. "Key Holder", "Founder").
+- For multi-level entity chains, include the signing authority context (e.g. "Managing Member of [GP Entity], its General Partner").
+
+**isExecuted**: Whether this page appears to actually be signed/executed.
+- true if there is a visible signature (ink, electronic, stamp, DocuSign completion marker).
+- false if the signature line is blank/unsigned.
+
+### MULTI-LEVEL ENTITY SIGNATURE BLOCKS (funds, LPs, trusts)
+Many entities sign through a chain of intermediaries:
+
+\`\`\`
+[ROLE LABEL] (if an entity):
+Name of [Role]: [Top-Level Entity], L.P.
+By: [Intermediate Entity], L.L.C., its general partner
+  By: ______________________________
+  Name: [Individual Name]
+  Title: [Title]
+\`\`\`
+
+- The PARTY is the TOP-LEVEL named entity (the fund/LP/trust)
+- The SIGNATORY is the INDIVIDUAL who physically signed (innermost "Name:" line)
+- The CAPACITY describes the signing chain
+- "Name of Holder:", "Name of Investor:" etc. indicate the top-level party name
+- Intermediate "By: [Entity], its general partner" lines are NOT the party
+
+Example:
+\`\`\`
+HOLDER (if an entity):
+Name of Holder: Sequoia Capital Fund XV, L.P.
+By: SC XV Management, L.L.C., its general partner
+  By: [signature]
+  Name: Jane Smith
+  Title: Managing Member
+\`\`\`
+→ partyName: "Sequoia Capital Fund XV, L.P.", signatoryName: "Jane Smith", capacity: "Managing Member of SC XV Management, L.L.C., its General Partner"
+
+### RULES
+1. The documentName is CRITICAL for matching this executed page to its agreement. Look carefully for it.
+2. If this is a scanned page, OCR the text to extract all information.
+3. If multiple signature blocks appear on one page, extract all of them.
+4. Apply the same Party vs Signatory vs Capacity distinction rules as for blank signature pages.
+5. When you see nested "By:" lines, always trace to the TOP-LEVEL entity for partyName and the BOTTOM-LEVEL individual for signatoryName.
+6. Look for "Name of [Role]:" patterns as a reliable indicator of the top-level party name.
+`;
+
+const EXECUTED_PAGE_RESPONSE_SCHEMA: Schema = {
+  type: Type.OBJECT,
+  properties: {
+    isExecuted: {
+      type: Type.BOOLEAN,
+      description: "True if the page appears to contain an actual signature (not blank/unsigned)."
+    },
+    documentName: {
+      type: Type.STRING,
+      description: "The name of the agreement this signature page belongs to, extracted from page text (e.g. 'Amended and Restated Investors Rights Agreement'). Empty string if not determinable."
+    },
+    signatures: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          partyName: {
+            type: Type.STRING,
+            description: "The legal entity or individual party. For multi-level entities (LPs, funds): the TOP-LEVEL entity name from 'Name of Holder/Investor:' lines, NOT intermediate entities. For individuals: their actual name, NOT their role label."
+          },
+          signatoryName: {
+            type: Type.STRING,
+            description: "The human name of the person who signed. For multi-level entity chains, this is the individual at the bottom of the 'By:' chain. For individuals signing personally, same as partyName."
+          },
+          capacity: {
+            type: Type.STRING,
+            description: "The title or role of the signatory. For multi-level entity chains, include the signing authority context (e.g. 'Managing Member of [GP], its General Partner'). For individuals: use their block label (e.g. 'Key Holder')."
+          }
+        }
+      }
+    }
+  },
+  required: ["isExecuted", "documentName", "signatures"]
+};
+
+export const analyzeExecutedPage = async (
+  base64Image: string,
+  modelName: string = 'gemini-2.5-flash'
+): Promise<ExecutedPageExtraction> => {
+  const cleanBase64 = base64Image.split(',')[1];
+
+  const callAI = async (promptText: string): Promise<ExecutedPageExtraction> => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const response = await ai.models.generateContent({
+      model: modelName,
+      contents: {
+        parts: [
+          { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
+          { text: promptText }
+        ]
+      },
+      config: {
+        systemInstruction: EXECUTED_PAGE_SYSTEM_INSTRUCTION,
+        responseMimeType: "application/json",
+        responseSchema: EXECUTED_PAGE_RESPONSE_SCHEMA
+      }
+    });
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+    return JSON.parse(text) as ExecutedPageExtraction;
+  };
+
+  try {
+    const result = await callAI(
+      "Analyze this executed signature page. Is it actually signed? Extract the document name, party, signatory, and capacity."
+    );
+
+    // Log raw result for debugging
+    if (result.isExecuted) {
+      console.log("[analyzeExecutedPage] Raw extraction:", JSON.stringify({ documentName: result.documentName, signatures: result.signatures }, null, 2));
+    }
+
+    // Retry with a more forceful prompt if any block is missing party or signatory
+    if (result.isExecuted && needsRetry(result.signatures)) {
+      console.warn("[analyzeExecutedPage] Missing party/signatory — retrying. Problematic blocks:",
+        result.signatures.filter(s => !s.partyName || !s.signatoryName));
+      try {
+        const retry = await callAI(
+          "IMPORTANT: One or more signature blocks returned an empty partyName or signatoryName. " +
+          "Look very carefully at the full signature block. " +
+          "If you see 'Name of Holder:', 'Name of Investor:', or similar, that fund/entity name IS the partyName. " +
+          "Trace all nested 'By:' lines to the individual at the bottom — that name is the signatoryName. " +
+          "Also look for the agreement name in headers or footers (e.g. 'Signature Page to [Agreement Name]'). " +
+          "Re-extract everything, ensuring partyName and signatoryName are never empty."
+        );
+        console.log("[analyzeExecutedPage] Retry result:", JSON.stringify(retry.signatures, null, 2));
+        if (retry.isExecuted && retry.signatures.length > 0) {
+          return retry;
+        }
+      } catch (retryErr) {
+        console.error("analyzeExecutedPage retry failed:", retryErr);
+      }
+    }
+
+    return result;
+
+  } catch (error) {
+    console.error("Gemini Executed Page Analysis Error:", error);
+    return { isExecuted: false, documentName: '', signatures: [] };
   }
 };

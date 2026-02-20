@@ -1,5 +1,5 @@
 import { PDFDocument } from 'pdf-lib';
-import { ExtractedSignaturePage, ProcessedDocument, GroupingMode } from '../types';
+import { ExtractedSignaturePage, ProcessedDocument, GroupingMode, AssemblyMatch, ExecutedUpload } from '../types';
 
 /**
  * Reads a file and returns its ArrayBuffer
@@ -216,6 +216,127 @@ export const generateGroupedPdfs = async (
     }
 
     results[safeName] = pdfBytes;
+  }
+
+  return results;
+};
+
+// --- Document Assembly Functions ---
+
+/**
+ * Assembles a single document by replacing blank signature pages with executed pages.
+ * Every page from the original document is copied; pages that have a replacement
+ * in the `replacements` map get swapped with the executed version.
+ *
+ * @param originalFile - The original agreement PDF file
+ * @param replacements - Map of 0-based page index → { executedFile, pageIndexInExecuted }
+ * @returns The assembled PDF as Uint8Array
+ */
+export const assembleDocument = async (
+  originalFile: File,
+  replacements: Map<number, { executedFile: File; pageIndexInExecuted: number }>
+): Promise<Uint8Array> => {
+  const originalBuffer = await readFileAsArrayBuffer(originalFile);
+  const originalDoc = await PDFDocument.load(originalBuffer);
+  const assembledPdf = await PDFDocument.create();
+
+  // Cache loaded executed PDFDocuments to avoid reloading the same file
+  const executedDocCache = new Map<File, PDFDocument>();
+
+  const totalPages = originalDoc.getPageCount();
+
+  for (let i = 0; i < totalPages; i++) {
+    const replacement = replacements.get(i);
+
+    if (replacement) {
+      // Swap in the executed page
+      let executedDoc = executedDocCache.get(replacement.executedFile);
+      if (!executedDoc) {
+        const execBuffer = await readFileAsArrayBuffer(replacement.executedFile);
+        executedDoc = await PDFDocument.load(execBuffer);
+        executedDocCache.set(replacement.executedFile, executedDoc);
+      }
+
+      const [copiedPage] = await assembledPdf.copyPages(executedDoc, [replacement.pageIndexInExecuted]);
+      assembledPdf.addPage(copiedPage);
+    } else {
+      // Keep the original page
+      const [copiedPage] = await assembledPdf.copyPages(originalDoc, [i]);
+      assembledPdf.addPage(copiedPage);
+    }
+  }
+
+  return await assembledPdf.save();
+};
+
+/**
+ * Assembles all documents that have at least one matched executed page.
+ * Groups matches by documentId, builds replacement maps, calls assembleDocument for each.
+ *
+ * @param documents - All processed documents (must have non-null file)
+ * @param matches - All assembly matches (auto + manual)
+ * @param executedUploads - All uploaded executed files
+ * @returns Map of sanitized filename → assembled PDF bytes
+ */
+export const assembleAllDocuments = async (
+  documents: ProcessedDocument[],
+  matches: AssemblyMatch[],
+  executedUploads: ExecutedUpload[]
+): Promise<Record<string, Uint8Array>> => {
+  const results: Record<string, Uint8Array> = {};
+
+  // Build a lookup: executedPageId → { file, pageIndexInSource }
+  const executedPageLookup = new Map<string, { file: File; pageIndexInSource: number }>();
+  for (const upload of executedUploads) {
+    for (const execPage of upload.executedPages) {
+      executedPageLookup.set(execPage.id, {
+        file: upload.file,
+        pageIndexInSource: execPage.pageIndexInSource,
+      });
+    }
+  }
+
+  // Group matches by documentId
+  const matchesByDoc: Record<string, AssemblyMatch[]> = {};
+  for (const match of matches) {
+    if (!matchesByDoc[match.documentId]) matchesByDoc[match.documentId] = [];
+    matchesByDoc[match.documentId].push(match);
+  }
+
+  // Assemble each document
+  for (const [docId, docMatches] of Object.entries(matchesByDoc)) {
+    const doc = documents.find(d => d.id === docId);
+    if (!doc || !doc.file) continue;
+
+    // Build the replacement map: pageIndex → executed source
+    const replacements = new Map<number, { executedFile: File; pageIndexInExecuted: number }>();
+
+    for (const match of docMatches) {
+      const execInfo = executedPageLookup.get(match.executedPageId);
+      if (execInfo) {
+        replacements.set(match.pageIndex, {
+          executedFile: execInfo.file,
+          pageIndexInExecuted: execInfo.pageIndexInSource,
+        });
+      }
+    }
+
+    if (replacements.size === 0) continue;
+
+    const assembledBytes = await assembleDocument(doc.file, replacements);
+
+    // Sanitize filename
+    let safeName = doc.name.replace(/[/\\?%*:|"<>]/g, '').trim();
+    if (!safeName) safeName = 'Assembled_Document';
+
+    // Add "_assembled" suffix before .pdf
+    if (safeName.toLowerCase().endsWith('.pdf')) {
+      safeName = safeName.slice(0, -4) + '_assembled.pdf';
+    } else {
+      safeName += '_assembled.pdf';
+    }
+
+    results[safeName] = assembledBytes;
   }
 
   return results;

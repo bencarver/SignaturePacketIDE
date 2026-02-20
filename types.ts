@@ -27,6 +27,63 @@ export interface ExtractedSignaturePage {
 
 export type GroupingMode = 'agreement' | 'counterparty' | 'signatory';
 
+export type AppMode = 'extract' | 'assembly';
+
+// --- Document Assembly Types ---
+
+export interface ExecutedPageExtraction {
+  isExecuted: boolean;
+  documentName: string;
+  signatures: Array<{
+    partyName: string;
+    signatoryName: string;
+    capacity: string;
+  }>;
+}
+
+export interface ExecutedSignaturePage {
+  id: string;
+  sourceUploadId: string;        // References ExecutedUpload.id
+  sourceFileName: string;
+  pageIndexInSource: number;     // 0-based within the uploaded file
+  pageNumber: number;            // 1-based display
+
+  // AI-extracted metadata
+  extractedDocumentName: string; // "Investors' Rights Agreement" etc.
+  extractedPartyName: string;
+  extractedSignatoryName: string;
+  extractedCapacity: string;
+  isConfirmedExecuted: boolean;  // AI says it's actually signed
+
+  thumbnailUrl: string;
+  originalWidth: number;
+  originalHeight: number;
+
+  matchedBlankPageId: string | null;
+  matchConfidence: 'auto' | 'manual' | null;
+}
+
+export interface ExecutedUpload {
+  id: string;
+  file: File;
+  fileName: string;
+  pageCount: number;
+  status: 'pending' | 'processing' | 'completed' | 'error';
+  progress?: number;
+  executedPages: ExecutedSignaturePage[];
+}
+
+export interface AssemblyMatch {
+  blankPageId: string;           // ExtractedSignaturePage.id
+  executedPageId: string;        // ExecutedSignaturePage.id
+  documentId: string;            // ProcessedDocument.id
+  documentName: string;
+  pageIndex: number;             // Exact page position in original PDF
+  partyName: string;
+  signatoryName: string;
+  status: 'auto-matched' | 'user-confirmed' | 'user-overridden';
+}
+
 export interface SavedConfiguration {
   version: 1;
   savedAt: string;
