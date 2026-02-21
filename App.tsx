@@ -863,8 +863,8 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-        
+      <div className="flex flex-1 overflow-hidden min-w-0">
+
         {/* Sidebar: Documents */}
         <div className="w-80 bg-white border-r border-slate-200 flex flex-col flex-shrink-0">
           <div className="p-4 border-b border-slate-100">
@@ -1109,9 +1109,9 @@ const App: React.FC = () => {
           </div>
 
           {/* Content Area with Nav */}
-          <div className="flex-1 flex overflow-hidden">
+          <div className="flex-1 flex overflow-hidden min-w-0">
             {/* Grid Area */}
-            <div className="flex-1 overflow-y-auto p-6 scroll-smooth">
+            <div className="flex-1 min-w-0 overflow-auto p-6 scroll-smooth">
 
              {appMode === 'extract' ? (
                // --- Extract Mode Content ---
