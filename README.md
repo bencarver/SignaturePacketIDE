@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/1b2ab8e4-0129-4319-aa13-05d31d714266
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/signature-packet-ide.git
+   git clone https://github.com/jamietso/signature-packet-ide.git
    cd signature-packet-ide
    ```
 
@@ -47,7 +47,7 @@ https://github.com/user-attachments/assets/1b2ab8e4-0129-4319-aa13-05d31d714266
 3. **Environment Configuration**:
    Create a `.env` file in the root directory and add your Google Gemini API Key:
    ```env
-   API_KEY=your_google_gemini_api_key_here
+   GEMINI_API_KEY=your_google_gemini_api_key_here
    ```
 
 4. **Run the application**:
