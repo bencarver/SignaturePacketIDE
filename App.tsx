@@ -55,19 +55,8 @@ const App: React.FC = () => {
   // Ref for load-config hidden file input
   const loadConfigInputRef = useRef<HTMLInputElement>(null);
 
-  // Route newly-pending documents: restored ones → rescan+merge, new ones → normal extract button
-  // Using a ref to prevent double-firing in StrictMode
-  const pendingRescanIds = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const restoredPending = documents.filter(
-      d => d.status === 'pending' && d.wasRestored && d.file && !pendingRescanIds.current.has(d.id)
-    );
-    if (restoredPending.length === 0) return;
-
-    restoredPending.forEach(d => pendingRescanIds.current.add(d.id));
-    processRestoredDocuments(restoredPending);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documents]);
+  // Guard against duplicate restore runs (StrictMode double-invoke, rapid re-uploads)
+  const restoringIds = useRef<Set<string>>(new Set());
 
   // --- Handlers ---
 
@@ -76,19 +65,25 @@ const App: React.FC = () => {
 
     const uploadedFiles = Array.from(files);
 
-    // Compute next state outside the setter so it only runs once (avoids StrictMode double-invoke)
+    // Snapshot current docs before setState to find restored matches
+    const restoredMatches: ProcessedDocument[] = [];
+    for (const f of uploadedFiles) {
+      const matched = documents.find(d => d.status === 'restored' && d.name === f.name);
+      if (matched && !restoringIds.current.has(matched.id)) {
+        restoringIds.current.add(matched.id);
+        restoredMatches.push({ ...matched, file: f, status: 'pending', wasRestored: true, savedPages: matched.extractedPages });
+      }
+    }
+
     setDocuments(prev => {
       const updatedDocs = [...prev];
       const newDocs: ProcessedDocument[] = [];
 
       for (const f of uploadedFiles) {
         const isPdf = f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf');
-
-        // Check if this file matches a restored document by name
         const restoredIdx = updatedDocs.findIndex(d => d.status === 'restored' && d.name === f.name);
 
         if (restoredIdx !== -1) {
-          // Attach the file; snapshot savedPages now before we clear them; rescan triggered via useEffect
           updatedDocs[restoredIdx] = {
             ...updatedDocs[restoredIdx],
             file: f,
@@ -97,7 +92,6 @@ const App: React.FC = () => {
             savedPages: updatedDocs[restoredIdx].extractedPages,
           };
         } else {
-          // Brand new file
           newDocs.push({
             id: uuidv4(),
             name: f.name,
@@ -111,6 +105,11 @@ const App: React.FC = () => {
 
       return [...updatedDocs, ...newDocs];
     });
+
+    if (restoredMatches.length > 0) {
+      await processRestoredDocuments(restoredMatches);
+      restoredMatches.forEach(d => restoringIds.current.delete(d.id));
+    }
   };
 
   const handleProcessPending = () => {
@@ -143,13 +142,8 @@ const App: React.FC = () => {
   const processRestoredDocuments = async (restoredDocs: ProcessedDocument[]) => {
     if (restoredDocs.length === 0) return;
 
-    if (!process.env.API_KEY) {
-      alert("API_KEY is missing from environment. Cannot re-scan documents.");
-      return;
-    }
-
     setIsProcessing(true);
-    setCurrentStatus(`Re-scanning ${restoredDocs.length} restored document${restoredDocs.length > 1 ? 's' : ''}...`);
+    setCurrentStatus(`Restoring ${restoredDocs.length} document${restoredDocs.length > 1 ? 's' : ''}...`);
 
     await Promise.all(restoredDocs.map(doc => processSingleDocumentWithMerge(doc)));
 
@@ -158,7 +152,7 @@ const App: React.FC = () => {
   };
 
   /**
-   * Like processSingleDocument but merges result with previously-saved page edits.
+   * Like processSingleDocument but skips AI — just re-renders thumbnails from the saved config.
    */
   const processSingleDocumentWithMerge = async (doc: ProcessedDocument) => {
     // savedPages was snapshotted onto the doc object at upload time, before we clear extractedPages
@@ -170,61 +164,26 @@ const App: React.FC = () => {
       const file = doc.file!;
       const pageCount = await getPageCount(file);
 
-      const candidateIndices = await findSignaturePageCandidates(file, (curr, total) => {
-        const progress = Math.round((curr / total) * 30);
-        setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress } : d));
-      });
-
+      // Skip AI re-extraction entirely — just re-render thumbnails for the pages we already know about
+      const uniquePageIndices = Array.from(new Set(savedPages.map(p => p.pageIndex))).sort((a, b) => a - b);
+      const total = uniquePageIndices.length;
       const freshPages: ExtractedSignaturePage[] = [];
 
-      if (candidateIndices.length > 0) {
-        let processedCount = 0;
-        const totalCandidates = candidateIndices.length;
-
-        for (let i = 0; i < candidateIndices.length; i += CONCURRENT_AI_REQUESTS_PER_DOC) {
-          const chunk = candidateIndices.slice(i, i + CONCURRENT_AI_REQUESTS_PER_DOC);
-
-          const chunkPromises = chunk.map(async (pageIndex) => {
-            try {
-              const { dataUrl, width, height } = await renderPageToImage(file, pageIndex);
-              const analysis = await analyzePage(dataUrl);
-
-              if (analysis.isSignaturePage) {
-                return analysis.signatures.map(sig => {
-                  // Find a saved page at the same pageIndex to merge edits from
-                  const saved = savedPages.find(sp => sp.pageIndex === pageIndex);
-                  return {
-                    id: saved?.id ?? uuidv4(),
-                    documentId: doc.id,
-                    documentName: doc.name,
-                    pageIndex,
-                    pageNumber: pageIndex + 1,
-                    // Prefer saved user edits; fall back to fresh AI extraction
-                    partyName: saved?.partyName ?? sig.partyName ?? 'Unknown Party',
-                    signatoryName: saved?.signatoryName ?? sig.signatoryName ?? '',
-                    capacity: saved?.capacity ?? sig.capacity ?? 'Signatory',
-                    copies: saved?.copies ?? 1,
-                    // Always use the freshly rendered thumbnail
-                    thumbnailUrl: dataUrl,
-                    originalWidth: width,
-                    originalHeight: height,
-                  };
-                });
-              }
-            } catch (err) {
-              console.error(`Error re-scanning page ${pageIndex} of ${doc.name}`, err);
-            }
-            return [];
+      for (let i = 0; i < uniquePageIndices.length; i++) {
+        const pageIndex = uniquePageIndices[i];
+        try {
+          const { dataUrl, width, height } = await renderPageToImage(file, pageIndex);
+          // Restore all saved pages at this pageIndex with a fresh thumbnail
+          const pagesAtIndex = savedPages.filter(sp => sp.pageIndex === pageIndex);
+          pagesAtIndex.forEach(saved => {
+            freshPages.push({ ...saved, thumbnailUrl: dataUrl, originalWidth: width, originalHeight: height });
           });
-
-          const chunkResults = await Promise.all(chunkPromises);
-
-          processedCount += chunk.length;
-          const aiProgress = 30 + Math.round((processedCount / totalCandidates) * 70);
-          setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: aiProgress } : d));
-
-          chunkResults.flat().forEach(p => { if (p) freshPages.push(p); });
+        } catch (err) {
+          console.error(`Error rendering page ${pageIndex} of ${doc.name}`, err);
+          // Keep saved page as-is if render fails (stale thumbnail better than nothing)
+          savedPages.filter(sp => sp.pageIndex === pageIndex).forEach(saved => freshPages.push(saved));
         }
+        setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: Math.round(((i + 1) / total) * 100) } : d));
       }
 
       setDocuments(prev => prev.map(d => d.id === doc.id ? {
@@ -237,13 +196,13 @@ const App: React.FC = () => {
         savedPages: undefined,
       } : d));
 
-      pendingRescanIds.current.delete(doc.id);
-      setCurrentStatus(`Re-scanned '${doc.name}' — edits preserved`);
+      restoringIds.current.delete(doc.id);
+      setCurrentStatus(`Restored '${doc.name}' — thumbnails refreshed`);
       setTimeout(() => setCurrentStatus(''), 3000);
 
     } catch (error) {
-      console.error(`Error re-scanning ${doc.name}`, error);
-      pendingRescanIds.current.delete(doc.id);
+      console.error(`Error restoring ${doc.name}`, error);
+      restoringIds.current.delete(doc.id);
       setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'error', wasRestored: undefined, savedPages: undefined } : d));
     }
   };
@@ -374,25 +333,82 @@ const App: React.FC = () => {
 
   // --- Save / Load Configuration ---
 
-  const handleSaveConfiguration = () => {
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        // Strip the data:...;base64, prefix to store raw base64
+        resolve(result.split(',')[1]);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleSaveConfiguration = async () => {
     const pages = documents.flatMap(d => d.extractedPages);
     if (pages.length === 0) return;
 
-    const config: SavedConfiguration = {
-      version: 1,
-      savedAt: new Date().toISOString(),
-      groupingMode,
-      documents: documents.map(({ id, name, pageCount }) => ({ id, name, pageCount })),
-      extractedPages: pages,
-    };
+    setIsProcessing(true);
+    setCurrentStatus('Bundling PDFs into config...');
 
-    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `SignatureConfig_${new Date().toISOString().slice(0, 10)}.json`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    try {
+      // Convert document PDFs to base64
+      const docEntries = await Promise.all(documents.map(async ({ id, name, pageCount, file }) => {
+        const entry: { id: string; name: string; pageCount: number; pdfBase64?: string } = { id, name, pageCount };
+        if (file) {
+          entry.pdfBase64 = await fileToBase64(file);
+        }
+        return entry;
+      }));
+
+      // Convert executed upload PDFs to base64
+      const execEntries = await Promise.all(
+        executedUploads
+          .filter(u => u.status === 'completed')
+          .map(async ({ id, fileName, pageCount, executedPages, file }) => {
+            const entry: { id: string; fileName: string; pageCount: number; executedPages: typeof executedPages; pdfBase64?: string } = { id, fileName, pageCount, executedPages };
+            if (file) {
+              entry.pdfBase64 = await fileToBase64(file);
+            }
+            return entry;
+          })
+      );
+
+      const config: SavedConfiguration = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        groupingMode,
+        documents: docEntries,
+        extractedPages: pages,
+        executedUploads: execEntries,
+        assemblyMatches,
+      };
+
+      const blob = new Blob([JSON.stringify(config)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `SignatureConfig_${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      console.error('Error saving configuration:', e);
+      alert('Failed to save configuration.');
+    } finally {
+      setIsProcessing(false);
+      setCurrentStatus('');
+    }
+  };
+
+  const base64ToFile = (base64: string, fileName: string): File => {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return new File([bytes], fileName, { type: 'application/pdf' });
   };
 
   const handleLoadConfiguration = (file: File | null) => {
@@ -418,18 +434,41 @@ const App: React.FC = () => {
           pagesByDocId.set(page.documentId, arr);
         }
 
-        const restoredDocs: ProcessedDocument[] = config.documents.map(d => ({
-          id: d.id,
-          name: d.name,
-          file: null,
-          pageCount: d.pageCount,
-          status: 'restored',
-          extractedPages: pagesByDocId.get(d.id) ?? [],
-        }));
+        const hasBundledPdfs = config.documents.some(d => !!d.pdfBase64);
+
+        const restoredDocs: ProcessedDocument[] = config.documents.map(d => {
+          const pdfFile = d.pdfBase64 ? base64ToFile(d.pdfBase64, d.name) : null;
+          return {
+            id: d.id,
+            name: d.name,
+            file: pdfFile,
+            pageCount: d.pageCount,
+            status: pdfFile ? 'completed' as const : 'restored' as const,
+            extractedPages: pagesByDocId.get(d.id) ?? [],
+          };
+        });
 
         setDocuments(restoredDocs);
         setGroupingMode(config.groupingMode);
-        setCurrentStatus('Configuration loaded — re-upload PDFs to enable pack download');
+
+        // Restore assembly state if present
+        if (config.executedUploads && config.executedUploads.length > 0) {
+          const restoredUploads: ExecutedUpload[] = config.executedUploads.map(u => ({
+            ...u,
+            file: u.pdfBase64 ? base64ToFile(u.pdfBase64, u.fileName) : null as unknown as File,
+            status: 'completed' as const,
+          }));
+          setExecutedUploads(restoredUploads);
+        }
+        if (config.assemblyMatches && config.assemblyMatches.length > 0) {
+          setAssemblyMatches(config.assemblyMatches);
+        }
+
+        if (hasBundledPdfs) {
+          setCurrentStatus('Configuration loaded with bundled PDFs');
+        } else {
+          setCurrentStatus('Configuration loaded — re-upload PDFs to enable pack download');
+        }
         setTimeout(() => setCurrentStatus(''), 4000);
       } catch {
         alert('Could not read configuration file. Make sure it is a valid Signature Packet IDE JSON.');

@@ -38,7 +38,7 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
 
   // Party names per signatory for header sub-labels
   const partiesBySignatory = (sigName: string): string[] =>
-    Array.from(new Set(blankPages
+    Array.from(new Set<string>(blankPages
       .filter(p => (p.signatoryName || '(Unnamed)') === sigName)
       .map(p => p.partyName)
     )).sort();

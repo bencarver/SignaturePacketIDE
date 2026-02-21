@@ -92,8 +92,18 @@ export interface SavedConfiguration {
     id: string;
     name: string;
     pageCount: number;
+    pdfBase64?: string; // Embedded PDF file data
   }>;
   extractedPages: ExtractedSignaturePage[];
+  // Assembly state (optional for backward compatibility with older configs)
+  executedUploads?: Array<{
+    id: string;
+    fileName: string;
+    pageCount: number;
+    executedPages: ExecutedSignaturePage[];
+    pdfBase64?: string; // Embedded PDF file data
+  }>;
+  assemblyMatches?: AssemblyMatch[];
 }
 
 export interface SignatureBlockExtraction {
