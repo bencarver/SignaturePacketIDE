@@ -10,6 +10,7 @@ https://github.com/user-attachments/assets/1b2ab8e4-0129-4319-aa13-05d31d714266
 
 ## Features
 
+### Extraction
 - **AI-Powered Extraction**: Uses Google Gemini 2.5 Flash to visually identify signature pages and extract:
   - **Party Name** (Entity bound by the contract)
   - **Signatory Name** (Human signing the document)
@@ -18,11 +19,22 @@ https://github.com/user-attachments/assets/1b2ab8e4-0129-4319-aa13-05d31d714266
   - **Agreement** (e.g., all pages for the SPA)
   - **Counterparty** (e.g., all pages for "Acme Corp" across all docs)
   - **Signatory** (e.g., all pages "Jane Smith" needs to sign)
-- **Privacy-First**: Documents are processed in-memory. No file storage persistence.
 - **Batch Processing**: Upload multiple transaction documents (PDF) at once.
 - **Integrated Preview**: View original PDFs and extracted signature pages instantly.
-- **Automatic Instructions**: Generates a clear signing table/instruction sheet for clients.
+- **Automatic Instructions**: Generates a per-signatory signing table (with party and capacity) to send to your client.
 - **Print-Ready Export**: Downloads a ZIP file containing perfectly sorted PDF packets for each party or agreement.
+
+### Document Assembly
+- **Executed Page Matching**: Upload signed/executed PDFs and let the AI identify which signature pages they correspond to.
+- **Auto-Match**: Automatically matches executed pages to blank signature pages by document name, party, and signatory.
+- **Assembly Progress Grid**: Visual checklist organized by signatory (columns) and document (rows) showing match status at a glance. Columns are drag-to-reorder.
+- **Manual Override**: Click any cell to manually assign or reassign an executed page.
+- **Assemble & Download**: Produces final assembled PDFs with blank signature pages swapped for their executed counterparts.
+
+### Configuration
+- **Save/Load Config**: Save your entire session (extracted pages, edits, assembly matches) to a `.json` file.
+- **Bundled PDFs**: Saved configs embed the original PDF files so you can restore a full session without re-uploading anything.
+- **Privacy-First**: All processing is done in-browser. No files are uploaded to any server.
 
 ## Tech Stack
 
@@ -57,13 +69,26 @@ https://github.com/user-attachments/assets/1b2ab8e4-0129-4319-aa13-05d31d714266
 
 ## Usage Guide
 
-1. **Upload**: Drag and drop your transaction documents (PDFs) into the sidebar.
-2. **Review**: The AI will extract signature pages. Review the "Party", "Signatory", and "Capacity" fields in the card view.
+### Extract Mode
+1. **Upload**: Drag and drop your transaction documents (PDFs) into the sidebar, then click **Extract**.
+2. **Review**: The AI will identify signature pages. Review the "Party", "Signatory", and "Capacity" fields for each page.
 3. **Adjust**:
    - Use the **Grouping Toggles** (Agreement / Party / Signatory) to change how pages are sorted.
    - Edit the **Copies** counter if a party needs to sign multiple originals.
-4. **Instructions**: Click "Instructions" to view and copy a signing table to send to your client.
+4. **Instructions**: Click "Instructions" to view and copy a per-signatory signing table to send to your client.
 5. **Download**: Click "Download ZIP" to get the organized PDF packets.
+
+### Assembly Mode
+1. Switch to the **Assembly** tab in the toolbar.
+2. **Upload Signed Pages**: Drop executed/scanned PDFs into the "Executed Pages" section of the sidebar.
+3. **Auto-Match**: Click **Auto-Match** to let the AI match executed pages to their corresponding blank signature pages.
+4. **Review**: The Assembly Progress grid shows each document (rows) × signatory (columns). Green = matched, amber = pending.
+5. **Manual Override**: Click any cell to manually assign or reassign a page.
+6. **Assemble & Download**: Click **Assemble & Download** to generate final PDFs with executed pages inserted.
+
+### Save & Restore
+- Click **Save Config** at any time to export your session (including all PDFs) to a `.json` file.
+- Click **Load Config** to restore a previous session instantly — no re-uploading required.
 
 ## Contributing
 
