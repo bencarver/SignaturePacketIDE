@@ -52,7 +52,7 @@ https://github.com/user-attachments/assets/1b2ab8e4-0129-4319-aa13-05d31d714266
 
 4. **Run the application**:
    ```bash
-   npm start
+   npm run dev
    ```
 
 ## Usage Guide
