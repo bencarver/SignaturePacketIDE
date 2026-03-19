@@ -57,6 +57,8 @@ const App: React.FC = () => {
 
   // Ref for load-config hidden file input
   const loadConfigInputRef = useRef<HTMLInputElement>(null);
+  const replaceDocInputRef = useRef<HTMLInputElement>(null);
+  const [replaceTargetDocId, setReplaceTargetDocId] = useState<string | null>(null);
 
   // Guard against duplicate restore runs (StrictMode double-invoke, rapid re-uploads)
   const restoringIds = useRef<Set<string>>(new Set());
@@ -106,14 +108,20 @@ const App: React.FC = () => {
     }));
     setCurrentStatus('');
 
-    // Snapshot current docs before setState to find restored matches
-    const restoredMatches: ProcessedDocument[] = [];
+    // Snapshot current docs before setState to find version updates by filename.
+    const versionUpdates: ProcessedDocument[] = [];
     for (const normalized of normalizedUploads) {
       if (!normalized.pdfFile) continue;
-      const matched = documents.find(d => d.status === 'restored' && d.name === normalized.pdfFile.name);
+      const matched = documents.find(d => d.name === normalized.pdfFile.name);
       if (matched && !restoringIds.current.has(matched.id)) {
         restoringIds.current.add(matched.id);
-        restoredMatches.push({ ...matched, file: normalized.pdfFile, status: 'pending', wasRestored: true, savedPages: matched.extractedPages });
+        versionUpdates.push({
+          ...matched,
+          file: normalized.pdfFile,
+          status: 'pending',
+          wasRestored: true,
+          savedPages: matched.extractedPages
+        });
       }
     }
 
@@ -123,16 +131,16 @@ const App: React.FC = () => {
 
       for (const normalized of normalizedUploads) {
         const file = normalized.pdfFile;
-        const restoredIdx = file ? updatedDocs.findIndex(d => d.status === 'restored' && d.name === file.name) : -1;
+        const existingIdx = file ? updatedDocs.findIndex(d => d.name === file.name) : -1;
 
-        if (restoredIdx !== -1) {
-          updatedDocs[restoredIdx] = {
-            ...updatedDocs[restoredIdx],
+        if (existingIdx !== -1) {
+          updatedDocs[existingIdx] = {
+            ...updatedDocs[existingIdx],
             file,
             status: 'pending',
             errorMessage: undefined,
             wasRestored: true,
-            savedPages: updatedDocs[restoredIdx].extractedPages,
+            savedPages: updatedDocs[existingIdx].extractedPages,
           };
         } else {
           newDocs.push({
@@ -150,10 +158,71 @@ const App: React.FC = () => {
       return [...updatedDocs, ...newDocs];
     });
 
-    if (restoredMatches.length > 0) {
-      await processRestoredDocuments(restoredMatches);
-      restoredMatches.forEach(d => restoringIds.current.delete(d.id));
+    if (versionUpdates.length > 0) {
+      await processVersionUpdatedDocuments(versionUpdates);
+      versionUpdates.forEach(d => restoringIds.current.delete(d.id));
     }
+  };
+
+  const handleReplaceDocumentClick = (docId: string) => {
+    setReplaceTargetDocId(docId);
+    replaceDocInputRef.current?.click();
+  };
+
+  const handleReplaceDocumentSelected = async (file: File | null) => {
+    if (!file || !replaceTargetDocId) {
+      if (replaceDocInputRef.current) replaceDocInputRef.current.value = '';
+      setReplaceTargetDocId(null);
+      return;
+    }
+
+    const targetDoc = documents.find(d => d.id === replaceTargetDocId);
+    if (!targetDoc) {
+      if (replaceDocInputRef.current) replaceDocInputRef.current.value = '';
+      setReplaceTargetDocId(null);
+      return;
+    }
+
+    setCurrentStatus(`Preparing replacement for '${targetDoc.name}'...`);
+
+    let normalizedFile: File | null = null;
+    try {
+      normalizedFile = await normalizeUploadToPdf(file);
+    } catch (error) {
+      setCurrentStatus(getErrorMessage(error, 'Replacement conversion failed'));
+      setTimeout(() => setCurrentStatus(''), 3500);
+      if (replaceDocInputRef.current) replaceDocInputRef.current.value = '';
+      setReplaceTargetDocId(null);
+      return;
+    }
+
+    if (!normalizedFile) {
+      setCurrentStatus('Unsupported file type. Please upload PDF or DOCX.');
+      setTimeout(() => setCurrentStatus(''), 3000);
+      if (replaceDocInputRef.current) replaceDocInputRef.current.value = '';
+      setReplaceTargetDocId(null);
+      return;
+    }
+
+    if (!restoringIds.current.has(targetDoc.id)) {
+      restoringIds.current.add(targetDoc.id);
+    }
+
+    const versionUpdate: ProcessedDocument = {
+      ...targetDoc,
+      file: normalizedFile,
+      status: 'pending',
+      errorMessage: undefined,
+      wasRestored: true,
+      savedPages: targetDoc.extractedPages,
+    };
+
+    setDocuments(prev => prev.map(d => d.id === targetDoc.id ? versionUpdate : d));
+    await processVersionUpdatedDocuments([versionUpdate]);
+    restoringIds.current.delete(targetDoc.id);
+
+    if (replaceDocInputRef.current) replaceDocInputRef.current.value = '';
+    setReplaceTargetDocId(null);
   };
 
   const handleProcessPending = () => {
@@ -179,24 +248,27 @@ const App: React.FC = () => {
   };
 
   /**
-   * Re-scan restored documents and merge fresh extraction with saved user edits.
-   * Saved edits (partyName, signatoryName, capacity, copies) are preserved for
-   * pages that still appear in the re-scan (matched by pageIndex).
+   * Re-process an updated version of existing documents while preserving prior
+   * extracted page edits. Existing extracted pages are retained by pageIndex;
+   * newly detected signature pages are appended.
    */
-  const processRestoredDocuments = async (restoredDocs: ProcessedDocument[]) => {
-    if (restoredDocs.length === 0) return;
+  const processVersionUpdatedDocuments = async (updatedDocs: ProcessedDocument[]) => {
+    if (updatedDocs.length === 0) return;
 
     setIsProcessing(true);
-    setCurrentStatus(`Restoring ${restoredDocs.length} document${restoredDocs.length > 1 ? 's' : ''}...`);
+    setCurrentStatus(`Updating ${updatedDocs.length} document version${updatedDocs.length > 1 ? 's' : ''}...`);
 
-    await Promise.all(restoredDocs.map(doc => processSingleDocumentWithMerge(doc)));
+    await Promise.all(updatedDocs.map(doc => processSingleDocumentWithMerge(doc)));
 
     setIsProcessing(false);
     setCurrentStatus('');
   };
 
   /**
-   * Like processSingleDocument but skips AI — just re-renders thumbnails from the saved config.
+   * Re-processes a version-updated document:
+   * 1) preserves prior extracted pages by pageIndex (including user edits)
+   * 2) refreshes their thumbnails from the new file when page indices still exist
+   * 3) scans for newly added signature pages and appends them
    */
   const processSingleDocumentWithMerge = async (doc: ProcessedDocument) => {
     // savedPages was snapshotted onto the doc object at upload time, before we clear extractedPages
@@ -215,26 +287,79 @@ const App: React.FC = () => {
       const file = doc.file!;
       const pageCount = await getPageCount(file);
 
-      // Skip AI re-extraction entirely — just re-render thumbnails for the pages we already know about
+      // First pass: refresh thumbnails for known extracted pages
       const uniquePageIndices = Array.from(new Set(savedPages.map(p => p.pageIndex))).sort((a, b) => a - b);
-      const total = uniquePageIndices.length;
+      const totalKnown = uniquePageIndices.length;
       const freshPages: ExtractedSignaturePage[] = [];
+      const knownIndexSet = new Set(uniquePageIndices);
 
       for (let i = 0; i < uniquePageIndices.length; i++) {
         const pageIndex = uniquePageIndices[i];
-        try {
-          const { dataUrl, width, height } = await renderPageToImage(file, pageIndex);
-          // Restore all saved pages at this pageIndex with a fresh thumbnail
-          const pagesAtIndex = savedPages.filter(sp => sp.pageIndex === pageIndex);
-          pagesAtIndex.forEach(saved => {
-            freshPages.push({ ...saved, thumbnailUrl: dataUrl, originalWidth: width, originalHeight: height });
-          });
-        } catch (err) {
-          console.error(`Error rendering page ${pageIndex} of ${doc.name}`, err);
-          // Keep saved page as-is if render fails (stale thumbnail better than nothing)
+        if (pageIndex >= pageCount) {
+          // Page no longer exists in latest version; keep prior extraction.
           savedPages.filter(sp => sp.pageIndex === pageIndex).forEach(saved => freshPages.push(saved));
+        } else {
+          try {
+            const { dataUrl, width, height } = await renderPageToImage(file, pageIndex);
+            const pagesAtIndex = savedPages.filter(sp => sp.pageIndex === pageIndex);
+            pagesAtIndex.forEach(saved => {
+              freshPages.push({ ...saved, thumbnailUrl: dataUrl, originalWidth: width, originalHeight: height });
+            });
+          } catch (err) {
+            console.error(`Error rendering page ${pageIndex} of ${doc.name}`, err);
+            // Keep saved page as-is if render fails (stale thumbnail better than nothing)
+            savedPages.filter(sp => sp.pageIndex === pageIndex).forEach(saved => freshPages.push(saved));
+          }
         }
-        setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: Math.round(((i + 1) / total) * 100) } : d));
+        const progressKnown = totalKnown === 0 ? 40 : Math.round(((i + 1) / totalKnown) * 40);
+        setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: progressKnown } : d));
+      }
+
+      // Second pass: detect newly added signature pages
+      const candidateIndices = await findSignaturePageCandidates(file, (curr, total) => {
+        const progress = 40 + Math.round((curr / total) * 30);
+        setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress } : d));
+      });
+      const newCandidateIndices = candidateIndices.filter(pageIndex => !knownIndexSet.has(pageIndex));
+
+      if (newCandidateIndices.length > 0) {
+        let processedNew = 0;
+        const totalNew = newCandidateIndices.length;
+
+        for (let i = 0; i < newCandidateIndices.length; i += CONCURRENT_AI_REQUESTS_PER_DOC) {
+          const chunk = newCandidateIndices.slice(i, i + CONCURRENT_AI_REQUESTS_PER_DOC);
+          const chunkPromises = chunk.map(async (pageIndex) => {
+            try {
+              const { dataUrl, width, height } = await renderPageToImage(file, pageIndex);
+              const analysis = await analyzePage(dataUrl);
+              if (analysis.isSignaturePage) {
+                return analysis.signatures.map(sig => ({
+                  id: uuidv4(),
+                  documentId: doc.id,
+                  documentName: doc.name,
+                  pageIndex,
+                  pageNumber: pageIndex + 1,
+                  partyName: sig.partyName || "Unknown Party",
+                  signatoryName: sig.signatoryName || "",
+                  capacity: sig.capacity || "Signatory",
+                  copies: 1,
+                  thumbnailUrl: dataUrl,
+                  originalWidth: width,
+                  originalHeight: height
+                }));
+              }
+            } catch (err) {
+              console.error(`Error analyzing new page ${pageIndex} of ${doc.name}`, err);
+            }
+            return [];
+          });
+
+          const chunkResults = await Promise.all(chunkPromises);
+          chunkResults.flat().forEach(p => { if (p) freshPages.push(p); });
+          processedNew += chunk.length;
+          const aiProgress = 70 + Math.round((processedNew / totalNew) * 30);
+          setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: aiProgress } : d));
+        }
       }
 
       setDocuments(prev => prev.map(d => d.id === doc.id ? {
@@ -249,7 +374,7 @@ const App: React.FC = () => {
       } : d));
 
       restoringIds.current.delete(doc.id);
-      setCurrentStatus(`Restored '${doc.name}' — thumbnails refreshed`);
+      setCurrentStatus(`Updated '${doc.name}' — kept prior pages, added new detections`);
       setTimeout(() => setCurrentStatus(''), 3000);
 
     } catch (error) {
@@ -942,6 +1067,15 @@ const App: React.FC = () => {
         onUnmatch={handleUnmatch}
       />
 
+      {/* Replace Version Input */}
+      <input
+        ref={replaceDocInputRef}
+        type="file"
+        accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        className="hidden"
+        onChange={(e) => handleReplaceDocumentSelected(e.target.files?.[0] ?? null)}
+      />
+
       {/* Header */}
       <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between flex-shrink-0 z-10">
         <div className="flex items-center gap-3">
@@ -1087,6 +1221,15 @@ const App: React.FC = () => {
                         >
                         <Eye size={14} />
                         </button>
+                    )}
+                    {doc.status !== 'processing' && (
+                      <button
+                        onClick={() => handleReplaceDocumentClick(doc.id)}
+                        className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-indigo-500 transition-all mr-1"
+                        title="Replace with new version"
+                      >
+                        <UploadCloud size={14} />
+                      </button>
                     )}
                     <button
                       onClick={() => removeDocument(doc.id)}
