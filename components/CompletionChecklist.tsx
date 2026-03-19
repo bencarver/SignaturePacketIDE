@@ -1,6 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { ExtractedSignaturePage, AssemblyMatch, ExecutedSignaturePage } from '../types';
-import { CheckCircle2, AlertTriangle, Minus, Printer } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, Minus, Printer, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface CompletionChecklistProps {
   blankPages: ExtractedSignaturePage[];
@@ -45,6 +45,13 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
 
   // Drag state
   const dragIndex = useRef<number | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const tableSizerRef = useRef<HTMLDivElement>(null);
+  const [maxScrollLeft, setMaxScrollLeft] = useState<number>(0);
+  const [scrollLeft, setScrollLeft] = useState<number>(0);
+  const TABLE_DOC_COL_WIDTH = 260;
+  const TABLE_SIG_COL_WIDTH = 220;
+  const tablePixelWidth = TABLE_DOC_COL_WIDTH + (signatoryNames.length * TABLE_SIG_COL_WIDTH);
 
   // Build match lookup: blankPageId → AssemblyMatch
   const matchByBlankId = new Map<string, AssemblyMatch>();
@@ -130,8 +137,64 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
     setTimeout(() => printWindow.print(), 300);
   };
 
+  const handleChecklistWheel: React.WheelEventHandler<HTMLDivElement> = (event) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    // Let trackpads handle natural horizontal scroll, but map vertical wheel
+    // to horizontal movement when this grid can scroll sideways.
+    const canScrollHorizontally = container.scrollWidth > container.clientWidth;
+    if (!canScrollHorizontally) return;
+
+    const dominantVertical = Math.abs(event.deltaY) > Math.abs(event.deltaX);
+    if (dominantVertical && event.deltaY !== 0) {
+      container.scrollLeft += event.deltaY;
+      event.preventDefault();
+    }
+  };
+
+  useEffect(() => {
+    const localViewport = scrollContainerRef.current;
+    const sizer = tableSizerRef.current;
+    if (!localViewport || !sizer) return;
+
+    const updateScrollMetrics = () => {
+      const width = Math.max(tablePixelWidth, sizer.scrollWidth);
+      const max = Math.max(0, width - localViewport.clientWidth);
+      setMaxScrollLeft(max);
+      setScrollLeft(Math.min(localViewport.scrollLeft, max));
+    };
+
+    updateScrollMetrics();
+    const observer = new ResizeObserver(updateScrollMetrics);
+    observer.observe(localViewport);
+    observer.observe(sizer);
+    const onScroll = () => {
+      setScrollLeft(localViewport.scrollLeft);
+    };
+    localViewport.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      observer.disconnect();
+      localViewport.removeEventListener('scroll', onScroll);
+    };
+  }, [blankPages.length, matches.length, signatoryNames.length, documentNames.length, tablePixelWidth]);
+
+  const handleSliderChange: React.ChangeEventHandler<HTMLInputElement> = (event) => {
+    const next = Number(event.currentTarget.value);
+    const host = scrollContainerRef.current;
+    if (host) host.scrollLeft = next;
+    setScrollLeft(next);
+  };
+
+  const scrollByAmount = (delta: number) => {
+    const host = scrollContainerRef.current;
+    if (!host) return;
+    host.scrollLeft += delta;
+    setScrollLeft(host.scrollLeft);
+  };
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 w-full min-w-0 max-w-full">
       {/* Summary bar */}
       <div className="flex items-center gap-4 bg-white border border-slate-200 rounded-lg px-4 py-3">
         <div className="flex-1">
@@ -167,11 +230,53 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
       </div>
 
       {/* Grid */}
-      <div className="bg-white border border-slate-200 rounded-lg overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
-          <table className="text-sm border-collapse" style={{ minWidth: 'max-content', width: '100%' }}>
+      <div className="bg-white border border-slate-200 rounded-lg px-3 pt-2 w-full min-w-0 max-w-full">
+        <div className="pb-2 px-1">
+          <div className="flex items-center gap-2 mb-1">
+            <button
+              type="button"
+              onClick={() => scrollByAmount(-320)}
+              className="inline-flex items-center justify-center h-6 w-6 rounded border border-slate-200 text-slate-500 hover:bg-slate-50"
+              title="Scroll left"
+              aria-label="Scroll left"
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => scrollByAmount(320)}
+              className="inline-flex items-center justify-center h-6 w-6 rounded border border-slate-200 text-slate-500 hover:bg-slate-50"
+              title="Scroll right"
+              aria-label="Scroll right"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={Math.max(1, maxScrollLeft)}
+            step={1}
+            value={Math.min(scrollLeft, Math.max(1, maxScrollLeft))}
+            onChange={handleSliderChange}
+            className="w-full accent-blue-600"
+            disabled={maxScrollLeft <= 0}
+            aria-label="Scroll horizontally through assembly columns"
+          />
+        </div>
+      </div>
+
+      <div
+        ref={scrollContainerRef}
+        onWheel={handleChecklistWheel}
+        className="bg-white border border-slate-200 rounded-lg overflow-x-auto overflow-y-visible w-full min-w-0 max-w-full pb-2"
+        style={{ WebkitOverflowScrolling: 'touch' }}
+      >
+        <div ref={tableSizerRef} className="min-w-max" style={{ minWidth: tablePixelWidth, width: tablePixelWidth }}>
+          <table className="text-sm border-collapse w-max min-w-max" style={{ minWidth: tablePixelWidth, width: tablePixelWidth }}>
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200">
-                <th className="text-left px-4 py-3 font-semibold text-slate-600 min-w-[220px] max-w-[300px]"
+                <th className="text-left px-4 py-3 font-semibold text-slate-600 min-w-[260px] w-[260px] max-w-[260px]"
                     style={{ position: 'sticky', left: 0, zIndex: 10, background: '#f8fafc', boxShadow: '2px 0 4px -1px rgba(0,0,0,0.08)' }}>
                   Document
                 </th>
@@ -189,12 +294,12 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
                       setSignatoryOrder(next);
                       dragIndex.current = null;
                     }}
-                    className="text-center px-3 py-3 font-medium text-slate-600 min-w-[150px] max-w-[200px] cursor-grab select-none"
+                    className="text-center px-3 py-3 font-medium text-slate-600 min-w-[220px] w-[220px] max-w-[220px] cursor-grab select-none"
                   >
-                    <div className="text-xs leading-snug break-words">{sigName}</div>
+                    <div className="text-xs leading-snug truncate" title={sigName}>{sigName}</div>
                     <div className="flex flex-wrap justify-center gap-0.5 mt-1">
                       {partiesBySignatory(sigName).map(party => (
-                        <span key={party} className="text-[9px] text-slate-400 font-normal bg-slate-100 rounded px-1 py-0.5 leading-tight">{party}</span>
+                        <span key={party} className="text-[9px] text-slate-400 font-normal bg-slate-100 rounded px-1 py-0.5 leading-tight max-w-[200px] truncate" title={party}>{party}</span>
                       ))}
                     </div>
                   </th>
@@ -204,9 +309,9 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
             <tbody className="divide-y divide-slate-100">
               {documentNames.map((docName, rowIdx) => (
                 <tr key={docName} className="hover:bg-slate-50/50">
-                  <td className="px-4 py-3 font-medium text-slate-700 min-w-[220px] max-w-[300px]"
+                  <td className="px-4 py-3 font-medium text-slate-700 min-w-[260px] w-[260px] max-w-[260px]"
                       style={{ position: 'sticky', left: 0, zIndex: 9, background: rowIdx % 2 === 0 ? '#ffffff' : '#f8fafc', boxShadow: '2px 0 4px -1px rgba(0,0,0,0.06)' }}>
-                    <span className="break-words block leading-snug" title={docName}>
+                    <span className="break-words whitespace-normal block leading-snug" title={docName}>
                       {docName}
                     </span>
                   </td>
@@ -215,7 +320,7 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
 
                     if (cellData.length === 0) {
                       return (
-                        <td key={sigName} className="text-center px-3 py-3">
+                        <td key={sigName} className="text-center px-3 py-3 min-w-[220px] w-[220px] max-w-[220px]">
                           <div className="flex items-center justify-center">
                             <Minus size={16} className="text-slate-200" />
                           </div>
@@ -224,7 +329,7 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
                     }
 
                     return (
-                      <td key={sigName} className="text-center px-3 py-3">
+                      <td key={sigName} className="text-center px-3 py-3 min-w-[220px] w-[220px] max-w-[220px]">
                         <div className="flex flex-col gap-1 items-center">
                           {cellData.map(cell => {
                             const isMatched = !!cell.match;
@@ -261,6 +366,7 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
               ))}
             </tbody>
           </table>
+        </div>
       </div>
     </div>
   );

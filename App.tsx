@@ -1176,7 +1176,7 @@ const App: React.FC = () => {
                      <FileIcon size={16} />
                   </div>
                   <div className="flex-1 min-w-0">
-                     <p className={`text-sm font-medium truncate ${
+                    <p className={`text-sm font-medium break-words whitespace-normal leading-snug ${
                        doc.status === 'error' ? 'text-red-700' :
                        doc.status === 'restored' ? 'text-amber-800' :
                        'text-slate-700'
@@ -1295,7 +1295,7 @@ const App: React.FC = () => {
                        <FileIcon size={16} />
                      </div>
                      <div className="flex-1 min-w-0">
-                       <p className="text-sm font-medium truncate text-slate-700" title={upload.fileName}>{upload.fileName}</p>
+                      <p className="text-sm font-medium break-words whitespace-normal leading-snug text-slate-700" title={upload.fileName}>{upload.fileName}</p>
                        <div className="text-xs text-slate-500 flex flex-col gap-1">
                          <div className="flex items-center gap-1">
                            {upload.status === 'processing' && <><Loader2 size={10} className="animate-spin" /> Analyzing...</>}
@@ -1334,7 +1334,7 @@ const App: React.FC = () => {
         </div>
 
         {/* Main Content: Review Grid */}
-        <div className="flex-1 flex flex-col bg-slate-50/50">
+        <div className="flex-1 min-w-0 flex flex-col bg-slate-50/50">
           
           {/* Toolbar */}
           <div className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between flex-shrink-0 shadow-sm z-10">
@@ -1385,7 +1385,7 @@ const App: React.FC = () => {
           {/* Content Area with Nav */}
           <div className="flex-1 flex overflow-hidden min-w-0">
             {/* Grid Area */}
-            <div className="flex-1 min-w-0 overflow-auto p-6 scroll-smooth">
+            <div data-assembly-scroll-host className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-6 scroll-smooth">
 
              {appMode === 'extract' ? (
                // --- Extract Mode Content ---
@@ -1454,7 +1454,7 @@ const App: React.FC = () => {
                </>
              ) : (
                // --- Assembly Mode Content ---
-               <div className="space-y-6 pb-20">
+              <div className="space-y-6 pb-20 w-full min-w-0 max-w-full overflow-x-hidden">
                  {/* Completion Checklist Grid */}
                  <CompletionChecklist
                    blankPages={allPages}
