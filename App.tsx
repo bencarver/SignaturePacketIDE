@@ -6,6 +6,7 @@ import { ExtractedSignaturePage, GroupingMode, ProcessedDocument, SavedConfigura
 import { getPageCount, renderPageToImage, generateGroupedPdfs, findSignaturePageCandidates, extractSinglePagePdf, assembleAllDocuments } from './services/pdfService';
 import { analyzePage, analyzeExecutedPage } from './services/geminiService';
 import { autoMatch, createManualMatch } from './services/matchingService';
+import { convertDocxToPdf } from './services/docxService';
 import SignatureCard from './components/SignatureCard';
 import PdfPreviewModal from './components/PdfPreviewModal';
 import InstructionsModal from './components/InstructionsModal';
@@ -15,6 +16,8 @@ import MatchPickerModal from './components/MatchPickerModal';
 
 // Concurrency Constants for AI - Keeping AI limit per doc to avoid rate limits, but unlimited docs
 const CONCURRENT_AI_REQUESTS_PER_DOC = 5;
+type SupportedSourceFormat = 'pdf' | 'docx';
+type NormalizedUpload = { sourceFile: File; pdfFile: File | null; errorMessage?: string };
 
 const App: React.FC = () => {
   const [documents, setDocuments] = useState<ProcessedDocument[]>([]);
@@ -60,18 +63,57 @@ const App: React.FC = () => {
 
   // --- Handlers ---
 
+  const getSupportedSourceFormat = (file: File): SupportedSourceFormat | null => {
+    const lowerName = file.name.toLowerCase();
+    if (file.type === 'application/pdf' || lowerName.endsWith('.pdf')) return 'pdf';
+    if (
+      file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      lowerName.endsWith('.docx')
+    ) return 'docx';
+    return null;
+  };
+
+  const normalizeUploadToPdf = async (file: File): Promise<File | null> => {
+    const format = getSupportedSourceFormat(file);
+    if (!format) return null;
+    if (format === 'pdf') return file;
+    return convertDocxToPdf(file);
+  };
+
+  const getErrorMessage = (error: unknown, fallback: string): string => {
+    if (error instanceof Error && error.message) return error.message;
+    if (typeof error === 'string' && error.trim()) return error;
+    return fallback;
+  };
+
   const handleFileUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
 
     const uploadedFiles = Array.from(files);
+    setCurrentStatus('Preparing uploads...');
+
+    const normalizedUploads: NormalizedUpload[] = await Promise.all(uploadedFiles.map(async (f) => {
+      try {
+        const pdfFile = await normalizeUploadToPdf(f);
+        if (!pdfFile) {
+          return { sourceFile: f, pdfFile: null, errorMessage: 'Unsupported file type. Please upload PDF or DOCX.' };
+        }
+        return { sourceFile: f, pdfFile };
+      } catch (error) {
+        console.error(`Failed to normalize file ${f.name}`, error);
+        return { sourceFile: f, pdfFile: null, errorMessage: getErrorMessage(error, 'DOCX conversion failed') };
+      }
+    }));
+    setCurrentStatus('');
 
     // Snapshot current docs before setState to find restored matches
     const restoredMatches: ProcessedDocument[] = [];
-    for (const f of uploadedFiles) {
-      const matched = documents.find(d => d.status === 'restored' && d.name === f.name);
+    for (const normalized of normalizedUploads) {
+      if (!normalized.pdfFile) continue;
+      const matched = documents.find(d => d.status === 'restored' && d.name === normalized.pdfFile.name);
       if (matched && !restoringIds.current.has(matched.id)) {
         restoringIds.current.add(matched.id);
-        restoredMatches.push({ ...matched, file: f, status: 'pending', wasRestored: true, savedPages: matched.extractedPages });
+        restoredMatches.push({ ...matched, file: normalized.pdfFile, status: 'pending', wasRestored: true, savedPages: matched.extractedPages });
       }
     }
 
@@ -79,25 +121,27 @@ const App: React.FC = () => {
       const updatedDocs = [...prev];
       const newDocs: ProcessedDocument[] = [];
 
-      for (const f of uploadedFiles) {
-        const isPdf = f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf');
-        const restoredIdx = updatedDocs.findIndex(d => d.status === 'restored' && d.name === f.name);
+      for (const normalized of normalizedUploads) {
+        const file = normalized.pdfFile;
+        const restoredIdx = file ? updatedDocs.findIndex(d => d.status === 'restored' && d.name === file.name) : -1;
 
         if (restoredIdx !== -1) {
           updatedDocs[restoredIdx] = {
             ...updatedDocs[restoredIdx],
-            file: f,
+            file,
             status: 'pending',
+            errorMessage: undefined,
             wasRestored: true,
             savedPages: updatedDocs[restoredIdx].extractedPages,
           };
         } else {
           newDocs.push({
             id: uuidv4(),
-            name: f.name,
-            file: f,
+            name: file?.name ?? normalized.sourceFile.name,
+            file,
             pageCount: 0,
-            status: isPdf ? 'pending' : 'error',
+            status: file ? 'pending' : 'error',
+            errorMessage: normalized.errorMessage,
             extractedPages: [],
           });
         }
@@ -158,7 +202,14 @@ const App: React.FC = () => {
     // savedPages was snapshotted onto the doc object at upload time, before we clear extractedPages
     const savedPages: ExtractedSignaturePage[] = doc.savedPages ?? doc.extractedPages;
 
-    setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'processing', progress: 0, extractedPages: [], savedPages: undefined } : d));
+    setDocuments(prev => prev.map(d => d.id === doc.id ? {
+      ...d,
+      status: 'processing',
+      progress: 0,
+      errorMessage: undefined,
+      extractedPages: [],
+      savedPages: undefined
+    } : d));
 
     try {
       const file = doc.file!;
@@ -190,6 +241,7 @@ const App: React.FC = () => {
         ...d,
         status: 'completed',
         progress: 100,
+        errorMessage: undefined,
         pageCount,
         extractedPages: freshPages,
         wasRestored: undefined,
@@ -203,7 +255,13 @@ const App: React.FC = () => {
     } catch (error) {
       console.error(`Error restoring ${doc.name}`, error);
       restoringIds.current.delete(doc.id);
-      setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'error', wasRestored: undefined, savedPages: undefined } : d));
+      setDocuments(prev => prev.map(d => d.id === doc.id ? {
+        ...d,
+        status: 'error',
+        errorMessage: getErrorMessage(error, 'Failed to restore this document'),
+        wasRestored: undefined,
+        savedPages: undefined
+      } : d));
     }
   };
 
@@ -211,7 +269,7 @@ const App: React.FC = () => {
       if (!doc.file) return; // Safety guard — should not happen for normal pending docs
 
       // Update status to processing
-      setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'processing', progress: 0 } : d));
+      setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'processing', progress: 0, errorMessage: undefined } : d));
 
       try {
         const pageCount = await getPageCount(doc.file);
@@ -282,13 +340,18 @@ const App: React.FC = () => {
           ...d, 
           status: 'completed', 
           progress: 100,
+          errorMessage: undefined,
           pageCount,
           extractedPages 
         } : d));
 
       } catch (error) {
         console.error(`Error processing doc ${doc.name}`, error);
-        setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: 'error' } : d));
+        setDocuments(prev => prev.map(d => d.id === doc.id ? {
+          ...d,
+          status: 'error',
+          errorMessage: getErrorMessage(error, 'Failed to process this document')
+        } : d));
       }
   };
 
@@ -490,18 +553,34 @@ const App: React.FC = () => {
     if (!files || files.length === 0) return;
 
     const uploadedFiles = Array.from(files);
+    setCurrentStatus('Preparing executed uploads...');
+
+    const normalizedUploads: NormalizedUpload[] = await Promise.all(uploadedFiles.map(async (f) => {
+      try {
+        const pdfFile = await normalizeUploadToPdf(f);
+        if (!pdfFile) {
+          return { sourceFile: f, pdfFile: null, errorMessage: 'Unsupported file type. Please upload PDF or DOCX.' };
+        }
+        return { sourceFile: f, pdfFile };
+      } catch (error) {
+        console.error(`Failed to normalize executed file ${f.name}`, error);
+        return { sourceFile: f, pdfFile: null, errorMessage: getErrorMessage(error, 'DOCX conversion failed') };
+      }
+    }));
+    setCurrentStatus('');
 
     // Create ExecutedUpload entries
-    const newUploads: ExecutedUpload[] = uploadedFiles
-      .filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'))
-      .map(f => ({
+    const newUploads: ExecutedUpload[] = normalizedUploads
+      .map(item => ({
         id: uuidv4(),
-        file: f,
-        fileName: f.name,
+        file: item.pdfFile ?? item.sourceFile,
+        fileName: (item.pdfFile?.name ?? item.sourceFile.name),
         pageCount: 0,
-        status: 'pending' as const,
+        status: item.pdfFile ? 'pending' as const : 'error' as const,
+        errorMessage: item.errorMessage,
         executedPages: [],
-      }));
+      }))
+      .filter(u => u.status === 'pending' || u.status === 'error');
 
     // Check for duplicate filenames
     const existingNames = new Set(executedUploads.map(u => `${u.fileName}_${u.file.size}`));
@@ -519,13 +598,13 @@ const App: React.FC = () => {
     setExecutedUploads(prev => [...prev, ...deduped]);
 
     // Process each upload
-    for (const upload of deduped) {
+    for (const upload of deduped.filter(u => u.status === 'pending')) {
       await processExecutedUpload(upload);
     }
   };
 
   const processExecutedUpload = async (upload: ExecutedUpload) => {
-    setExecutedUploads(prev => prev.map(u => u.id === upload.id ? { ...u, status: 'processing', progress: 0 } : u));
+    setExecutedUploads(prev => prev.map(u => u.id === upload.id ? { ...u, status: 'processing', progress: 0, errorMessage: undefined } : u));
 
     try {
       const pageCount = await getPageCount(upload.file);
@@ -590,13 +669,18 @@ const App: React.FC = () => {
         ...u,
         status: 'completed',
         progress: 100,
+        errorMessage: undefined,
         pageCount,
         executedPages,
       } : u));
 
     } catch (error) {
       console.error(`Error processing executed upload ${upload.fileName}`, error);
-      setExecutedUploads(prev => prev.map(u => u.id === upload.id ? { ...u, status: 'error' } : u));
+      setExecutedUploads(prev => prev.map(u => u.id === upload.id ? {
+        ...u,
+        status: 'error',
+        errorMessage: getErrorMessage(error, 'Failed to process this executed upload')
+      } : u));
     }
   };
 
@@ -921,7 +1005,7 @@ const App: React.FC = () => {
                 <input 
                   type="file" 
                   multiple 
-                  accept=".pdf"
+                  accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                   className="hidden" 
                   id="fileInput"
                   onChange={(e) => handleFileUpload(e.target.files)}
@@ -929,7 +1013,7 @@ const App: React.FC = () => {
                 <label htmlFor="fileInput" className="cursor-pointer flex flex-col items-center">
                    <UploadCloud className="text-blue-500 mb-2" size={24} />
                    <span className="text-sm font-medium text-slate-700">Upload Agreements</span>
-                   <span className="text-xs text-slate-400 mt-1">PDF only</span>
+                   <span className="text-xs text-slate-400 mt-1">PDF or DOCX (DOCX converts via configured service)</span>
                 </label>
              </div>
 
@@ -967,7 +1051,11 @@ const App: React.FC = () => {
                         <div className="flex items-center gap-1">
                           {doc.status === 'processing' && <><Loader2 size={10} className="animate-spin" /> Processing...</>}
                           {doc.status === 'completed' && <><CheckCircle2 size={10} className="text-green-500" /> {doc.extractedPages.length} sig pages</>}
-                          {doc.status === 'error' && <span className="text-red-500">PDF only</span>}
+                          {doc.status === 'error' && (
+                            <span className="text-red-500">
+                              {doc.errorMessage || 'PDF or DOCX only'}
+                            </span>
+                          )}
                           {doc.status === 'pending' && 'Queued'}
                           {doc.status === 'restored' && (
                             <span className="flex items-center gap-1 text-amber-600" title="Re-upload this PDF to enable pack download and re-scan for changes">
@@ -1037,7 +1125,7 @@ const App: React.FC = () => {
                      <input
                        type="file"
                        multiple
-                       accept=".pdf"
+                      accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                        className="hidden"
                        id="executedFileInput"
                        onChange={(e) => handleExecutedFileUpload(e.target.files)}
@@ -1069,7 +1157,11 @@ const App: React.FC = () => {
                          <div className="flex items-center gap-1">
                            {upload.status === 'processing' && <><Loader2 size={10} className="animate-spin" /> Analyzing...</>}
                            {upload.status === 'completed' && <><CheckCircle2 size={10} className="text-green-500" /> {upload.executedPages.filter(p => p.isConfirmedExecuted).length} signed pages</>}
-                           {upload.status === 'error' && <span className="text-red-500">Error</span>}
+                          {upload.status === 'error' && (
+                            <span className="text-red-500">
+                              {upload.errorMessage || 'Error'}
+                            </span>
+                          )}
                            {upload.status === 'pending' && 'Queued'}
                          </div>
                          {upload.status === 'processing' && upload.progress !== undefined && (
@@ -1161,7 +1253,7 @@ const App: React.FC = () => {
                         <Layers size={32} className="text-slate-300" />
                       </div>
                       <p className="text-lg font-medium text-slate-500">No signature pages found yet</p>
-                      <p className="text-sm max-w-md text-center mt-2">Upload agreements (PDF) to begin extraction.</p>
+                     <p className="text-sm max-w-md text-center mt-2">Upload agreements (PDF or DOCX) to begin extraction.</p>
                    </div>
                  ) : (
                     <div className="space-y-8 pb-20">
@@ -1254,7 +1346,7 @@ const App: React.FC = () => {
                        <ArrowLeftRight size={32} className="text-slate-300" />
                      </div>
                      <p className="text-lg font-medium text-slate-500">No executed pages yet</p>
-                     <p className="text-sm max-w-md text-center mt-2">Upload signed PDFs in the sidebar to begin matching.</p>
+                    <p className="text-sm max-w-md text-center mt-2">Upload signed PDFs or DOCX files in the sidebar to begin matching.</p>
                    </div>
                  )}
                </div>
