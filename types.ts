@@ -7,6 +7,7 @@ export interface ProcessedDocument {
   wasRestored?: boolean; // true if this doc came from a saved config and needs merge-rescan
   savedPages?: ExtractedSignaturePage[]; // holds the saved pages during rescan so they survive state clearing
   progress?: number; // 0 to 100
+  errorMessage?: string;
   extractedPages: ExtractedSignaturePage[];
 }
 
@@ -70,6 +71,7 @@ export interface ExecutedUpload {
   pageCount: number;
   status: 'pending' | 'processing' | 'completed' | 'error';
   progress?: number;
+  errorMessage?: string;
   executedPages: ExecutedSignaturePage[];
 }
 
