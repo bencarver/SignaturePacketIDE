@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { UploadCloud, File as FileIcon, Loader2, Download, Layers, Users, X, CheckCircle2, FileText, Eye, UserPen, Save, FolderOpen, AlertTriangle, ArrowLeftRight, Wand2, Package } from 'lucide-react';
+import { UploadCloud, File as FileIcon, Loader2, Download, Layers, Users, X, CheckCircle2, FileText, Eye, UserPen, Save, FolderOpen, AlertTriangle, ArrowLeftRight, Wand2, Package, Pencil, Check } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import JSZip from 'jszip';
 import { ExtractedSignaturePage, GroupingMode, ProcessedDocument, SavedConfiguration, AppMode, ExecutedUpload, ExecutedSignaturePage, AssemblyMatch } from './types';
@@ -54,6 +54,9 @@ const App: React.FC = () => {
 
   // Instructions Modal State
   const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
+  const [renamingDocId, setRenamingDocId] = useState<string | null>(null);
+  const [renamingExecutedId, setRenamingExecutedId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
 
   // Ref for load-config hidden file input
   const loadConfigInputRef = useRef<HTMLInputElement>(null);
@@ -292,6 +295,7 @@ const App: React.FC = () => {
       const totalKnown = uniquePageIndices.length;
       const freshPages: ExtractedSignaturePage[] = [];
       const knownIndexSet = new Set(uniquePageIndices);
+      const changedKnownIndices = new Set<number>();
 
       for (let i = 0; i < uniquePageIndices.length; i++) {
         const pageIndex = uniquePageIndices[i];
@@ -302,6 +306,8 @@ const App: React.FC = () => {
           try {
             const { dataUrl, width, height } = await renderPageToImage(file, pageIndex);
             const pagesAtIndex = savedPages.filter(sp => sp.pageIndex === pageIndex);
+            const wasChanged = pagesAtIndex.some(saved => saved.thumbnailUrl !== dataUrl);
+            if (wasChanged) changedKnownIndices.add(pageIndex);
             pagesAtIndex.forEach(saved => {
               freshPages.push({ ...saved, thumbnailUrl: dataUrl, originalWidth: width, originalHeight: height });
             });
@@ -320,20 +326,24 @@ const App: React.FC = () => {
         const progress = 40 + Math.round((curr / total) * 30);
         setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress } : d));
       });
+      const changedIndices = Array.from(changedKnownIndices).filter(pageIndex => pageIndex < pageCount);
       const newCandidateIndices = candidateIndices.filter(pageIndex => !knownIndexSet.has(pageIndex));
+      const indicesToAnalyze = Array.from(new Set([...newCandidateIndices, ...changedIndices])).sort((a, b) => a - b);
 
-      if (newCandidateIndices.length > 0) {
+      if (indicesToAnalyze.length > 0) {
         let processedNew = 0;
-        const totalNew = newCandidateIndices.length;
+        const totalNew = indicesToAnalyze.length;
+        const changedIndexResults = new Map<number, ExtractedSignaturePage[]>();
+        const changedIndexErrors = new Set<number>();
 
-        for (let i = 0; i < newCandidateIndices.length; i += CONCURRENT_AI_REQUESTS_PER_DOC) {
-          const chunk = newCandidateIndices.slice(i, i + CONCURRENT_AI_REQUESTS_PER_DOC);
+        for (let i = 0; i < indicesToAnalyze.length; i += CONCURRENT_AI_REQUESTS_PER_DOC) {
+          const chunk = indicesToAnalyze.slice(i, i + CONCURRENT_AI_REQUESTS_PER_DOC);
           const chunkPromises = chunk.map(async (pageIndex) => {
             try {
               const { dataUrl, width, height } = await renderPageToImage(file, pageIndex);
               const analysis = await analyzePage(dataUrl);
               if (analysis.isSignaturePage) {
-                return analysis.signatures.map(sig => ({
+                const pages = analysis.signatures.map(sig => ({
                   id: uuidv4(),
                   documentId: doc.id,
                   documentName: doc.name,
@@ -347,19 +357,46 @@ const App: React.FC = () => {
                   originalWidth: width,
                   originalHeight: height
                 }));
+                return { pageIndex, pages, failed: false };
               }
+              return { pageIndex, pages: [] as ExtractedSignaturePage[], failed: false };
             } catch (err) {
-              console.error(`Error analyzing new page ${pageIndex} of ${doc.name}`, err);
+              console.error(`Error analyzing updated page ${pageIndex} of ${doc.name}`, err);
+              return { pageIndex, pages: [] as ExtractedSignaturePage[], failed: true };
             }
-            return [];
           });
 
           const chunkResults = await Promise.all(chunkPromises);
-          chunkResults.flat().forEach(p => { if (p) freshPages.push(p); });
+          chunkResults.forEach(result => {
+            const isChangedIndex = changedKnownIndices.has(result.pageIndex);
+            if (isChangedIndex) {
+              if (result.failed) {
+                changedIndexErrors.add(result.pageIndex);
+              } else {
+                changedIndexResults.set(result.pageIndex, result.pages);
+              }
+              return;
+            }
+            result.pages.forEach(p => freshPages.push(p));
+          });
+
           processedNew += chunk.length;
           const aiProgress = 70 + Math.round((processedNew / totalNew) * 30);
           setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: aiProgress } : d));
         }
+
+        // Replace changed pages with newly analyzed content when analysis succeeded.
+        changedIndices.forEach(pageIndex => {
+          if (changedIndexErrors.has(pageIndex)) {
+            // Keep previously preserved entries if analysis failed.
+            return;
+          }
+          const replacementPages = changedIndexResults.get(pageIndex) ?? [];
+          const withoutOld = freshPages.filter(p => p.pageIndex !== pageIndex);
+          withoutOld.push(...replacementPages);
+          freshPages.length = 0;
+          withoutOld.forEach(p => freshPages.push(p));
+        });
       }
 
       setDocuments(prev => prev.map(d => d.id === doc.id ? {
@@ -517,6 +554,51 @@ const App: React.FC = () => {
 
   const removeDocument = (docId: string) => {
     setDocuments(prev => prev.filter(d => d.id !== docId));
+  };
+
+  const beginRenameDocument = (doc: ProcessedDocument) => {
+    setRenamingDocId(doc.id);
+    setRenameDraft(doc.name);
+  };
+
+  const saveRenameDocument = (docId: string) => {
+    const nextName = renameDraft.trim();
+    if (!nextName) {
+      setRenamingDocId(null);
+      setRenameDraft('');
+      return;
+    }
+
+    setDocuments(prev => prev.map(doc => doc.id === docId ? {
+      ...doc,
+      name: nextName,
+      extractedPages: doc.extractedPages.map(p => ({ ...p, documentName: nextName }))
+    } : doc));
+    setAssemblyMatches(prev => prev.map(m => m.documentId === docId ? { ...m, documentName: nextName } : m));
+    setRenamingDocId(null);
+    setRenameDraft('');
+  };
+
+  const beginRenameExecutedUpload = (upload: ExecutedUpload) => {
+    setRenamingExecutedId(upload.id);
+    setRenameDraft(upload.fileName);
+  };
+
+  const saveRenameExecutedUpload = (uploadId: string) => {
+    const nextName = renameDraft.trim();
+    if (!nextName) {
+      setRenamingExecutedId(null);
+      setRenameDraft('');
+      return;
+    }
+
+    setExecutedUploads(prev => prev.map(upload => upload.id === uploadId ? {
+      ...upload,
+      fileName: nextName,
+      executedPages: upload.executedPages.map(page => ({ ...page, sourceFileName: nextName }))
+    } : upload));
+    setRenamingExecutedId(null);
+    setRenameDraft('');
   };
 
   // --- Save / Load Configuration ---
@@ -1176,11 +1258,24 @@ const App: React.FC = () => {
                      <FileIcon size={16} />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className={`text-sm font-medium break-words whitespace-normal leading-snug ${
-                       doc.status === 'error' ? 'text-red-700' :
-                       doc.status === 'restored' ? 'text-amber-800' :
-                       'text-slate-700'
-                     }`} title={doc.name}>{doc.name}</p>
+                    {renamingDocId === doc.id ? (
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveRenameDocument(doc.id);
+                          if (e.key === 'Escape') { setRenamingDocId(null); setRenameDraft(''); }
+                        }}
+                        className="w-full text-sm px-2 py-1 rounded border border-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    ) : (
+                      <p className={`text-sm font-medium break-words whitespace-normal leading-snug ${
+                        doc.status === 'error' ? 'text-red-700' :
+                        doc.status === 'restored' ? 'text-amber-800' :
+                        'text-slate-700'
+                      }`} title={doc.name}>{doc.name}</p>
+                    )}
                      <div className="text-xs text-slate-500 flex flex-col gap-1">
                         <div className="flex items-center gap-1">
                           {doc.status === 'processing' && <><Loader2 size={10} className="animate-spin" /> Processing...</>}
@@ -1222,22 +1317,50 @@ const App: React.FC = () => {
                         <Eye size={14} />
                         </button>
                     )}
-                    {doc.status !== 'processing' && (
-                      <button
-                        onClick={() => handleReplaceDocumentClick(doc.id)}
-                        className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-indigo-500 transition-all mr-1"
-                        title="Replace with new version"
-                      >
-                        <UploadCloud size={14} />
-                      </button>
+                    {renamingDocId === doc.id ? (
+                      <>
+                        <button
+                          onClick={() => saveRenameDocument(doc.id)}
+                          className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-green-600 transition-all mr-1"
+                          title="Save name"
+                        >
+                          <Check size={14} />
+                        </button>
+                        <button
+                          onClick={() => { setRenamingDocId(null); setRenameDraft(''); }}
+                          className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-red-500 transition-all"
+                          title="Cancel rename"
+                        >
+                          <X size={14} />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => beginRenameDocument(doc)}
+                          className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-blue-500 transition-all mr-1"
+                          title="Rename document"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        {doc.status !== 'processing' && (
+                          <button
+                            onClick={() => handleReplaceDocumentClick(doc.id)}
+                            className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-indigo-500 transition-all mr-1"
+                            title="Replace with new version"
+                          >
+                            <UploadCloud size={14} />
+                          </button>
+                        )}
+                        <button
+                          onClick={() => removeDocument(doc.id)}
+                          className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-red-500 transition-all"
+                          title="Remove Document"
+                        >
+                          <X size={14} />
+                        </button>
+                      </>
                     )}
-                    <button
-                      onClick={() => removeDocument(doc.id)}
-                      className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-red-500 transition-all"
-                      title="Remove Document"
-                    >
-                      <X size={14} />
-                    </button>
                   </div>
 
                </div>
@@ -1295,7 +1418,20 @@ const App: React.FC = () => {
                        <FileIcon size={16} />
                      </div>
                      <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium break-words whitespace-normal leading-snug text-slate-700" title={upload.fileName}>{upload.fileName}</p>
+                      {renamingExecutedId === upload.id ? (
+                        <input
+                          autoFocus
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') saveRenameExecutedUpload(upload.id);
+                            if (e.key === 'Escape') { setRenamingExecutedId(null); setRenameDraft(''); }
+                          }}
+                          className="w-full text-sm px-2 py-1 rounded border border-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      ) : (
+                        <p className="text-sm font-medium break-words whitespace-normal leading-snug text-slate-700" title={upload.fileName}>{upload.fileName}</p>
+                      )}
                        <div className="text-xs text-slate-500 flex flex-col gap-1">
                          <div className="flex items-center gap-1">
                            {upload.status === 'processing' && <><Loader2 size={10} className="animate-spin" /> Analyzing...</>}
@@ -1318,13 +1454,41 @@ const App: React.FC = () => {
                        </div>
                      </div>
                      <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                       <button
-                         onClick={() => removeExecutedUpload(upload.id)}
-                         className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-red-500 transition-all"
-                         title="Remove"
-                       >
-                         <X size={14} />
-                       </button>
+                      {renamingExecutedId === upload.id ? (
+                        <>
+                          <button
+                            onClick={() => saveRenameExecutedUpload(upload.id)}
+                            className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-green-600 transition-all mr-1"
+                            title="Save name"
+                          >
+                            <Check size={14} />
+                          </button>
+                          <button
+                            onClick={() => { setRenamingExecutedId(null); setRenameDraft(''); }}
+                            className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-red-500 transition-all"
+                            title="Cancel rename"
+                          >
+                            <X size={14} />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => beginRenameExecutedUpload(upload)}
+                            className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-blue-500 transition-all mr-1"
+                            title="Rename upload"
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          <button
+                            onClick={() => removeExecutedUpload(upload.id)}
+                            className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-red-500 transition-all"
+                            title="Remove"
+                          >
+                            <X size={14} />
+                          </button>
+                        </>
+                      )}
                      </div>
                    </div>
                  ))}
