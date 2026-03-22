@@ -2,9 +2,33 @@ import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  analyzeExecutedPageWithGemini,
+  analyzeSignaturePageWithGemini,
+  getGeminiApiKey,
+} from './geminiAnalyze.js';
 
 const app = express();
-const port = Number(process.env.DOCX_CONVERTER_PORT || 8787);
+
+/** Large JSON bodies for base64 page images → Gemini */
+const geminiJsonParser = express.json({ limit: '35mb' });
+// Cloud Run sets PORT; local dev may use DOCX_CONVERTER_PORT
+const port = Number(process.env.PORT || process.env.DOCX_CONVERTER_PORT || 8787);
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+/** Vite `dist/`: next to `backend/` when using `tsx`; two levels up when running compiled `backend/dist/server.js`. */
+const distPath = (() => {
+  const nextToBackend = path.resolve(__dirname, '../dist');
+  if (fs.existsSync(path.join(nextToBackend, 'index.html'))) {
+    return nextToBackend;
+  }
+  return path.resolve(__dirname, '../../dist');
+})();
 const graphBaseUrl = process.env.M365_GRAPH_BASE_URL || 'https://graph.microsoft.com/v1.0';
 
 const upload = multer({
@@ -65,6 +89,58 @@ const buildUserDrivePathUrl = (userId: string, folder: string, fileName: string)
 
 app.get('/api/health', (_req, res) => {
   res.status(200).json({ ok: true });
+});
+
+app.get('/api/gemini/health', (_req, res) => {
+  res.status(200).json({ ok: true, geminiConfigured: Boolean(getGeminiApiKey()) });
+});
+
+app.post('/api/gemini/analyze-signature-page', geminiJsonParser, async (req, res) => {
+  try {
+    if (!getGeminiApiKey()) {
+      res.status(503).json({ error: 'GEMINI_API_KEY is not configured on the server' });
+      return;
+    }
+    const base64Image = req.body?.base64Image;
+    if (typeof base64Image !== 'string' || !base64Image.trim()) {
+      res.status(400).json({ error: 'Missing or invalid base64Image' });
+      return;
+    }
+    const modelName =
+      typeof req.body?.modelName === 'string' && req.body.modelName.trim()
+        ? req.body.modelName.trim()
+        : 'gemini-2.5-flash';
+    const result = await analyzeSignaturePageWithGemini(base64Image, modelName);
+    res.status(200).json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown Gemini error';
+    console.error('Gemini signature-page route failed:', message);
+    res.status(500).json({ error: 'Gemini analysis failed', detail: message });
+  }
+});
+
+app.post('/api/gemini/analyze-executed-page', geminiJsonParser, async (req, res) => {
+  try {
+    if (!getGeminiApiKey()) {
+      res.status(503).json({ error: 'GEMINI_API_KEY is not configured on the server' });
+      return;
+    }
+    const base64Image = req.body?.base64Image;
+    if (typeof base64Image !== 'string' || !base64Image.trim()) {
+      res.status(400).json({ error: 'Missing or invalid base64Image' });
+      return;
+    }
+    const modelName =
+      typeof req.body?.modelName === 'string' && req.body.modelName.trim()
+        ? req.body.modelName.trim()
+        : 'gemini-2.5-flash';
+    const result = await analyzeExecutedPageWithGemini(base64Image, modelName);
+    res.status(200).json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown Gemini error';
+    console.error('Gemini executed-page route failed:', message);
+    res.status(500).json({ error: 'Gemini analysis failed', detail: message });
+  }
 });
 
 app.post('/api/docx-to-pdf', upload.single('file'), async (req, res) => {
@@ -145,6 +221,29 @@ app.post('/api/docx-to-pdf', upload.single('file'), async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`DOCX converter API listening on http://localhost:${port}`);
+// --- Production: serve Vite static app + SPA fallback (same origin as /api) ---
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get(/.*/, (req, res, next) => {
+    if (req.path.startsWith('/api')) {
+      next();
+      return;
+    }
+    const indexFile = path.join(distPath, 'index.html');
+    if (!fs.existsSync(indexFile)) {
+      next();
+      return;
+    }
+    res.sendFile(indexFile);
+  });
+}
+
+// Unknown API paths → JSON 404 (avoid sending index.html for /api/*)
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+app.listen(port, '0.0.0.0', () => {
+  const mode = fs.existsSync(distPath) ? 'app + API' : 'API only';
+  console.log(`Listening on 0.0.0.0:${port} (${mode})`);
 });

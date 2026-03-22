@@ -447,7 +447,6 @@ const App: React.FC = () => {
         const extractedPages: ExtractedSignaturePage[] = [];
 
         if (candidateIndices.length === 0) {
-           console.log(`No signature candidates found in ${doc.name} via regex.`);
            setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: 100 } : d));
         } else {
             // Process candidates in chunks to respect AI concurrency limit PER DOC
@@ -1161,7 +1160,21 @@ const App: React.FC = () => {
       {/* Header */}
       <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between flex-shrink-0 z-10">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-lg">S</div>
+          <div
+            className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center p-1 shrink-0"
+            aria-hidden
+          >
+            <div className="w-full h-full bg-white rounded flex items-center justify-center overflow-hidden">
+              <img
+                src="/favicon-32.png"
+                alt=""
+                width={22}
+                height={22}
+                className="w-[22px] h-[22px] object-contain"
+                decoding="async"
+              />
+            </div>
+          </div>
           <div>
             <h1 className="text-xl font-bold text-slate-800 tracking-tight leading-none">Signature Packet IDE</h1>
             <p className="text-xs text-slate-500 font-medium">Automated Signature Page Extraction</p>
