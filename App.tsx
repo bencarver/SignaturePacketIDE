@@ -62,6 +62,8 @@ const App: React.FC = () => {
   const loadConfigInputRef = useRef<HTMLInputElement>(null);
   const replaceDocInputRef = useRef<HTMLInputElement>(null);
   const [replaceTargetDocId, setReplaceTargetDocId] = useState<string | null>(null);
+  /** Assembly: filter for “Missing pages” ZIP (`__all__` or exact signatory label). */
+  const [missingPackSignatoryFilter, setMissingPackSignatoryFilter] = useState<string>('__all__');
 
   // Guard against duplicate restore runs (StrictMode double-invoke, rapid re-uploads)
   const restoringIds = useRef<Set<string>>(new Set());
@@ -1087,6 +1089,46 @@ const App: React.FC = () => {
     return Array.from(groups);
   }, [displayedPages, groupingMode]);
 
+  /** Blank signature pages with no assembly match (copies > 0). */
+  const missingBlankPages = useMemo(() => {
+    const matched = new Set(assemblyMatches.map((m) => m.blankPageId));
+    return allPages.filter((p) => p.copies > 0 && !matched.has(p.id));
+  }, [allPages, assemblyMatches]);
+
+  /** Subset we can export (parent document still has PDF on disk). */
+  const { missingDownloadablePages, missingSkippedNoSourceFile } = useMemo(() => {
+    const downloadable: ExtractedSignaturePage[] = [];
+    let skipped = 0;
+    for (const p of missingBlankPages) {
+      const doc = documents.find((d) => d.id === p.documentId);
+      if (doc?.file) downloadable.push(p);
+      else skipped += 1;
+    }
+    return { missingDownloadablePages: downloadable, missingSkippedNoSourceFile: skipped };
+  }, [missingBlankPages, documents]);
+
+  const missingSignatoryOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const p of missingDownloadablePages) {
+      names.add(p.signatoryName?.trim() || 'Unknown Signatory');
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [missingDownloadablePages]);
+
+  useEffect(() => {
+    if (missingPackSignatoryFilter === '__all__') return;
+    if (!missingSignatoryOptions.includes(missingPackSignatoryFilter)) {
+      setMissingPackSignatoryFilter('__all__');
+    }
+  }, [missingSignatoryOptions, missingPackSignatoryFilter]);
+
+  const pagesForMissingPack = useMemo(() => {
+    if (missingPackSignatoryFilter === '__all__') return missingDownloadablePages;
+    return missingDownloadablePages.filter(
+      (p) => (p.signatoryName?.trim() || 'Unknown Signatory') === missingPackSignatoryFilter,
+    );
+  }, [missingDownloadablePages, missingPackSignatoryFilter]);
+
   const scrollToGroup = (groupName: string) => {
     const id = `group-${groupName.replace(/[^a-zA-Z0-9]/g, '_')}`;
     const element = document.getElementById(id);
@@ -1125,6 +1167,49 @@ const App: React.FC = () => {
     } catch (e) {
       console.error(e);
       alert("Failed to generate ZIP pack");
+    } finally {
+      setIsProcessing(false);
+      setCurrentStatus('');
+    }
+  };
+
+  /**
+   * ZIP of blank signature pages that are still unmatched — for chasing a signatory or counsel.
+   * PDFs are grouped by agreement name (stable in Assembly when grouping toggles are hidden).
+   */
+  const handleDownloadMissingPack = async () => {
+    if (pagesForMissingPack.length === 0) return;
+    setIsProcessing(true);
+    setCurrentStatus('Generating missing-pages pack...');
+
+    try {
+      const pdfs = await generateGroupedPdfs(documents, pagesForMissingPack, 'agreement');
+
+      const zip = new JSZip();
+      for (const [filename, data] of Object.entries(pdfs)) {
+        zip.file(filename, data);
+      }
+
+      const zipContent = await zip.generateAsync({ type: 'blob' });
+      const url = window.URL.createObjectURL(zipContent);
+      const link = document.createElement('a');
+      link.href = url;
+      const who =
+        missingPackSignatoryFilter === '__all__'
+          ? 'all'
+          : missingPackSignatoryFilter.replace(/[/\\?%*:|"<>]/g, '_').slice(0, 80);
+      link.download = `SignaturePack_missing_${who}_${new Date().toISOString().slice(0, 10)}.zip`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+      if (missingSkippedNoSourceFile > 0) {
+        window.alert(
+          `${missingSkippedNoSourceFile} unmatched page(s) were omitted because the source document has no PDF on disk (re-upload from a saved config to include them).`,
+        );
+      }
+    } catch (e) {
+      console.error(e);
+      window.alert('Failed to generate missing-pages pack');
     } finally {
       setIsProcessing(false);
       setCurrentStatus('');
@@ -1738,20 +1823,50 @@ const App: React.FC = () => {
           )}
 
           {/* Floating Action Bar — Assembly Mode */}
-          {appMode === 'assembly' && allExecutedPages.length > 0 && (
-            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-1 py-1 rounded-full shadow-xl flex items-center gap-1 z-20">
+          {appMode === 'assembly' && allPages.length > 0 && (
+            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-2 py-2 rounded-2xl shadow-xl flex flex-wrap items-center justify-center gap-1 max-w-[min(56rem,calc(100vw-2rem))] z-20">
                <button
                  onClick={handleAutoMatch}
                  disabled={isProcessing || allExecutedPages.filter(p => p.isConfirmedExecuted).length === 0}
-                 className="px-5 py-2.5 rounded-full hover:bg-slate-800 transition-colors font-medium text-sm flex items-center gap-2 disabled:opacity-50"
+                 className="px-4 py-2.5 rounded-full hover:bg-slate-800 transition-colors font-medium text-sm flex items-center gap-2 disabled:opacity-50"
                >
                  <Wand2 size={16} /> Auto-Match
                </button>
-               <div className="w-px h-5 bg-slate-700"></div>
+               <div className="w-px h-5 bg-slate-700 hidden sm:block"></div>
+               {missingSignatoryOptions.length > 0 && (
+                 <select
+                   aria-label="Filter missing pages by signatory"
+                   value={missingPackSignatoryFilter}
+                   onChange={(e) => setMissingPackSignatoryFilter(e.target.value)}
+                   className="text-slate-900 text-xs font-medium rounded-full border-0 bg-slate-100 px-3 py-2 max-w-[11rem] sm:max-w-[14rem] truncate"
+                 >
+                   <option value="__all__">All signatories ({missingDownloadablePages.length})</option>
+                   {missingSignatoryOptions.map((name) => {
+                     const count = missingDownloadablePages.filter(
+                       (p) => (p.signatoryName?.trim() || 'Unknown Signatory') === name,
+                     ).length;
+                     return (
+                       <option key={name} value={name}>
+                         {name} ({count})
+                       </option>
+                     );
+                   })}
+                 </select>
+               )}
+               <button
+                 onClick={handleDownloadMissingPack}
+                 disabled={isProcessing || pagesForMissingPack.length === 0}
+                 title="ZIP of unmatched blank signature pages only, one PDF per agreement"
+                 className="px-4 py-2.5 rounded-full bg-amber-600 hover:bg-amber-500 transition-colors font-medium text-sm flex items-center gap-2 shadow-lg shadow-amber-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
+               >
+                 {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Package size={16} />}
+                 Missing pages
+               </button>
+               <div className="w-px h-5 bg-slate-700 hidden sm:block"></div>
                <button
                  onClick={handleAssembleDocuments}
                  disabled={isProcessing || assemblyMatches.length === 0}
-                 className="px-5 py-2.5 rounded-full bg-green-600 hover:bg-green-500 transition-colors font-medium text-sm flex items-center gap-2 shadow-lg shadow-green-900/20 disabled:opacity-50"
+                 className="px-4 py-2.5 rounded-full bg-green-600 hover:bg-green-500 transition-colors font-medium text-sm flex items-center gap-2 shadow-lg shadow-green-900/20 disabled:opacity-50"
                >
                  {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
                  Assemble & Download

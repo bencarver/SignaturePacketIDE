@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { ExtractedSignaturePage, AssemblyMatch, ExecutedSignaturePage } from '../types';
 import { CheckCircle2, AlertTriangle, Minus, Printer, ChevronLeft, ChevronRight } from 'lucide-react';
 
@@ -25,15 +25,25 @@ const CompletionChecklist: React.FC<CompletionChecklistProps> = ({
   blankPages.forEach(p => docNameSet.add(p.documentName));
   const documentNames = Array.from(docNameSet).sort();
 
-  // Build unique signatory columns — one column per signatory regardless of party
-  const initialSignatoryNames = Array.from(new Set(blankPages.map(p => p.signatoryName || '(Unnamed)'))).sort();
-  const [signatoryOrder, setSignatoryOrder] = useState<string[]>(initialSignatoryNames);
-  // Sync if the set of signatories changes (e.g. new pages loaded)
-  const prevSignatories = useRef<string>(JSON.stringify(initialSignatoryNames));
-  if (prevSignatories.current !== JSON.stringify(initialSignatoryNames)) {
-    prevSignatories.current = JSON.stringify(initialSignatoryNames);
-    setSignatoryOrder(initialSignatoryNames);
-  }
+  // Unique signatory columns — stable key avoids resetting column order on unrelated parent re-renders.
+  const signatorySetKey = useMemo(
+    () =>
+      Array.from(new Set(blankPages.map((p) => p.signatoryName || '(Unnamed)')))
+        .sort()
+        .join('\0'),
+    [blankPages],
+  );
+  const derivedSignatories = useMemo(
+    () => Array.from(new Set(blankPages.map((p) => p.signatoryName || '(Unnamed)'))).sort(),
+    [signatorySetKey, blankPages],
+  );
+  const [signatoryOrder, setSignatoryOrder] = useState<string[]>(() => derivedSignatories);
+  const lastSignatoryKeyRef = useRef(signatorySetKey);
+  useEffect(() => {
+    if (lastSignatoryKeyRef.current === signatorySetKey) return;
+    lastSignatoryKeyRef.current = signatorySetKey;
+    setSignatoryOrder(derivedSignatories);
+  }, [signatorySetKey, derivedSignatories]);
   const signatoryNames = signatoryOrder;
 
   // Party names per signatory for header sub-labels
