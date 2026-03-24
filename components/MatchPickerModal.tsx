@@ -108,9 +108,14 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
               </div>
             </div>
             <div className="space-y-2 text-sm">
-              <div className="flex items-center gap-2">
-                <FileText size={14} className="text-slate-400" />
-                <span className="text-slate-700 font-medium truncate">{blankPage.documentName}</span>
+              <div className="flex items-start gap-2">
+                <FileText size={14} className="text-slate-400 shrink-0 mt-0.5" />
+                <span
+                  className="text-slate-700 font-medium min-w-0 break-words"
+                  title={blankPage.documentName}
+                >
+                  {blankPage.documentName}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <Users size={14} className="text-slate-400" />
@@ -217,9 +222,14 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
 
                       {/* Info */}
                       <div className="flex-1 min-w-0">
-                        <div className="text-xs text-slate-400 truncate mb-1">{ep.sourceFileName}</div>
+                        <div className="text-xs text-slate-400 break-words mb-1" title={ep.sourceFileName}>
+                          {ep.sourceFileName}
+                        </div>
                         {ep.extractedDocumentName && (
-                          <div className="text-sm text-slate-700 font-medium truncate">
+                          <div
+                            className="text-sm text-slate-700 font-medium break-words"
+                            title={ep.extractedDocumentName}
+                          >
                             {ep.extractedDocumentName}
                           </div>
                         )}

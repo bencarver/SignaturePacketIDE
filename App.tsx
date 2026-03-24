@@ -16,6 +16,13 @@ import MatchPickerModal from './components/MatchPickerModal';
 
 // Concurrency Constants for AI - Keeping AI limit per doc to avoid rate limits, but unlimited docs
 const CONCURRENT_AI_REQUESTS_PER_DOC = 5;
+
+/** When the PDF text layer has no signature keywords (common for DocuSign/scanned exports), scan every page with vision. */
+function allPageIndices(pageCount: number): number[] {
+  return Array.from({ length: pageCount }, (_, i) => i);
+}
+
+const FALLBACK_AI_PAGE_WARN_THRESHOLD = 60;
 type SupportedSourceFormat = 'pdf' | 'docx';
 type NormalizedUpload = { sourceFile: File; pdfFile: File | null; errorMessage?: string };
 
@@ -328,9 +335,23 @@ const App: React.FC = () => {
         const progress = 40 + Math.round((curr / total) * 30);
         setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress } : d));
       });
+      let effectiveCandidates = candidateIndices;
+      const mergeHeuristicFallback = candidateIndices.length === 0 && pageCount > 0;
+      if (mergeHeuristicFallback) {
+        effectiveCandidates = allPageIndices(pageCount);
+      }
       const changedIndices = Array.from(changedKnownIndices).filter(pageIndex => pageIndex < pageCount);
-      const newCandidateIndices = candidateIndices.filter(pageIndex => !knownIndexSet.has(pageIndex));
+      const newCandidateIndices = effectiveCandidates.filter(pageIndex => !knownIndexSet.has(pageIndex));
       const indicesToAnalyze = Array.from(new Set([...newCandidateIndices, ...changedIndices])).sort((a, b) => a - b);
+
+      if (mergeHeuristicFallback && indicesToAnalyze.length > 0) {
+        if (pageCount >= FALLBACK_AI_PAGE_WARN_THRESHOLD) {
+          console.warn(
+            `[Signature scan] No keyword matches in "${doc.name}" (merge) — analyzing ${indicesToAnalyze.length} page(s) with AI (full-doc fallback).`
+          );
+        }
+        setCurrentStatus(`No keyword matches — scanning pages with AI for updates…`);
+      }
 
       if (indicesToAnalyze.length > 0) {
         let processedNew = 0;
@@ -413,8 +434,13 @@ const App: React.FC = () => {
       } : d));
 
       restoringIds.current.delete(doc.id);
-      setCurrentStatus(`Updated '${doc.name}' — kept prior pages, added new detections`);
-      setTimeout(() => setCurrentStatus(''), 3000);
+      if (mergeHeuristicFallback && indicesToAnalyze.length > 0) {
+        setCurrentStatus(`Updated '${doc.name}' — kept prior pages; used full-document AI scan for new pages`);
+        setTimeout(() => setCurrentStatus(''), 4000);
+      } else {
+        setCurrentStatus(`Updated '${doc.name}' — kept prior pages, added new detections`);
+        setTimeout(() => setCurrentStatus(''), 3000);
+      }
 
     } catch (error) {
       console.error(`Error restoring ${doc.name}`, error);
@@ -445,18 +471,29 @@ const App: React.FC = () => {
            setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress } : d));
         });
 
+        let indicesForAI = candidateIndices;
+        if (candidateIndices.length === 0 && pageCount > 0) {
+          indicesForAI = allPageIndices(pageCount);
+          if (pageCount >= FALLBACK_AI_PAGE_WARN_THRESHOLD) {
+            console.warn(
+              `[Signature scan] No keyword matches in "${doc.name}" — analyzing all ${pageCount} pages with AI (slower, higher API use).`
+            );
+          }
+          setCurrentStatus(`No keyword matches — scanning all ${pageCount} pages with AI…`);
+        }
+
         // 2. Visual AI Analysis on Candidate Pages (Parallelized)
         const extractedPages: ExtractedSignaturePage[] = [];
 
-        if (candidateIndices.length === 0) {
+        if (indicesForAI.length === 0) {
            setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, progress: 100 } : d));
         } else {
             // Process candidates in chunks to respect AI concurrency limit PER DOC
             let processedCount = 0;
-            const totalCandidates = candidateIndices.length;
+            const totalCandidates = indicesForAI.length;
 
-            for (let i = 0; i < candidateIndices.length; i += CONCURRENT_AI_REQUESTS_PER_DOC) {
-                const chunk = candidateIndices.slice(i, i + CONCURRENT_AI_REQUESTS_PER_DOC);
+            for (let i = 0; i < indicesForAI.length; i += CONCURRENT_AI_REQUESTS_PER_DOC) {
+                const chunk = indicesForAI.slice(i, i + CONCURRENT_AI_REQUESTS_PER_DOC);
                 
                 const chunkPromises = chunk.map(async (pageIndex) => {
                     try {
@@ -507,6 +544,10 @@ const App: React.FC = () => {
           pageCount,
           extractedPages 
         } : d));
+
+        if (candidateIndices.length === 0 && pageCount > 0) {
+          setTimeout(() => setCurrentStatus(''), 4000);
+        }
 
       } catch (error) {
         console.error(`Error processing doc ${doc.name}`, error);
@@ -1005,6 +1046,25 @@ const App: React.FC = () => {
     }
     setPreviewState({ isOpen: false, url: null, title: '' });
   };
+
+  /** Escape closes the top overlay: PDF preview (z above match picker), then Reassign / Match dialog. */
+  useEffect(() => {
+    if (!previewState.isOpen && !matchPickerState.isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      if (previewState.isOpen) {
+        if (previewState.url) URL.revokeObjectURL(previewState.url);
+        setPreviewState({ isOpen: false, url: null, title: '' });
+        return;
+      }
+      if (matchPickerState.isOpen) {
+        setMatchPickerState({ isOpen: false, blankPageId: null, currentMatch: null });
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [previewState.isOpen, previewState.url, matchPickerState.isOpen]);
 
   const handlePreviewDocument = async (doc: ProcessedDocument) => {
     if (doc.status === 'error' || doc.status === 'restored' || !doc.file) return;
