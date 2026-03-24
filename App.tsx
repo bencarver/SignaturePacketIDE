@@ -1026,6 +1026,21 @@ const App: React.FC = () => {
     }
   };
 
+  const handlePreviewExecutedPage = async (page: ExecutedSignaturePage) => {
+    const sourceUpload = executedUploads.find(u => u.id === page.sourceUploadId);
+    if (!sourceUpload) return;
+
+    try {
+      const pdfBytes = await extractSinglePagePdf(sourceUpload.file, page.pageIndexInSource);
+      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      openPreview(url, `${page.sourceFileName} - Page ${page.pageNumber}`);
+    } catch (e) {
+      console.error("Preview error", e);
+      alert("Could not generate preview.");
+    }
+  };
+
   // --- Derived State for View ---
 
   const allPages = useMemo(() => {
@@ -1146,6 +1161,8 @@ const App: React.FC = () => {
         allMatches={assemblyMatches}
         onConfirmMatch={handleManualMatch}
         onUnmatch={handleUnmatch}
+        onPreviewBlank={handlePreviewSignaturePage}
+        onPreviewExecuted={handlePreviewExecutedPage}
       />
 
       {/* Replace Version Input */}
@@ -1654,6 +1671,7 @@ const App: React.FC = () => {
                            page={ep}
                            match={assemblyMatches.find(m => m.executedPageId === ep.id) || null}
                            onUnmatch={handleUnmatchByExecutedId}
+                          onPreview={handlePreviewExecutedPage}
                          />
                        ))}
                      </div>

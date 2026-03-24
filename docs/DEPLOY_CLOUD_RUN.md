@@ -52,6 +52,8 @@ Or: `npm run docker:build:cloudrun` (see `package.json`).
 
 **Gemini:** Set **`GEMINI_API_KEY`** at **runtime** on Cloud Run (Secret Manager — see Phase 4). No build-arg required. Local: add `GEMINI_API_KEY` to `.env` and run **`npm run dev:full`** (or `dev:backend` + `dev`).
 
+**Troubleshooting (401 “API keys are not supported by this API” on `aiplatform.googleapis.com`):** The `@google/genai` SDK turns on **Vertex** when env **`GOOGLE_GENAI_USE_VERTEXAI=true`**. Vertex does not accept a Gemini **API key**. Either remove that env var (and related `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` if you were only using them for Vertex), or deploy a build that uses Vertex with the runtime service account — see branch `feature/vertex-gemini`. Current `main` forces **`vertexai: false`** when using `GEMINI_API_KEY` so API-key mode works even if Vertex env vars are still set.
+
 | Step | Task |
 |------|------|
 | 2.1 | **Stage `build`:** `npm ci`, copy source, `npm run build` → `dist/`. |

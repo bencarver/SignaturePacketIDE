@@ -1,6 +1,11 @@
 /**
  * Server-only Gemini calls. Uses GEMINI_API_KEY from the environment (e.g. Secret Manager on Cloud Run).
  *
+ * **Important:** `@google/genai` reads `GOOGLE_GENAI_USE_VERTEXAI` from the environment. If it is `true`,
+ * the client targets Vertex (`aiplatform.googleapis.com`), which does **not** accept API keys → 401.
+ * We pass `vertexai: false` explicitly so API-key mode always uses the Gemini Developer API, even when
+ * Cloud Run still has Vertex env vars from a prior deploy.
+ *
  * Verbose extraction logging (PII-heavy): set DEBUG_GEMINI=1. Default is quiet for production logs.
  */
 import { GoogleGenAI, Type, Schema } from '@google/genai';
@@ -270,6 +275,11 @@ export function getGeminiApiKey(): string | undefined {
   return k || undefined;
 }
 
+/** Gemini Developer API (API key). `vertexai: false` overrides GOOGLE_GENAI_USE_VERTEXAI in the environment. */
+function createGeminiApiKeyClient(apiKey: string): GoogleGenAI {
+  return new GoogleGenAI({ apiKey, vertexai: false });
+}
+
 function stripDataUrlPrefix(dataUrlOrRaw: string): string {
   if (dataUrlOrRaw.startsWith('data:') && dataUrlOrRaw.includes(',')) {
     return dataUrlOrRaw.split(',')[1] ?? dataUrlOrRaw;
@@ -290,7 +300,7 @@ export async function analyzeSignaturePageWithGemini(
   const cleanBase64 = stripDataUrlPrefix(base64Image);
 
   const callAI = async (promptText: string): Promise<SignatureBlockExtraction> => {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = createGeminiApiKeyClient(apiKey);
     const response = await ai.models.generateContent({
       model: modelName,
       contents: {
@@ -371,7 +381,7 @@ export async function analyzeExecutedPageWithGemini(
   const cleanBase64 = stripDataUrlPrefix(base64Image);
 
   const callAI = async (promptText: string): Promise<ExecutedPageExtraction> => {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = createGeminiApiKeyClient(apiKey);
     const response = await ai.models.generateContent({
       model: modelName,
       contents: {

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, CheckCircle2, FileText, Users, UserPen, Briefcase, ArrowRight, Unlink } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, CheckCircle2, FileText, Users, UserPen, Briefcase, ArrowRight, Unlink, Eye } from 'lucide-react';
 import { ExtractedSignaturePage, ExecutedSignaturePage, AssemblyMatch } from '../types';
 
 interface MatchPickerModalProps {
@@ -11,6 +11,8 @@ interface MatchPickerModalProps {
   allMatches: AssemblyMatch[];
   onConfirmMatch: (blankPageId: string, executedPageId: string) => void;
   onUnmatch: (blankPageId: string) => void;
+  onPreviewBlank: (page: ExtractedSignaturePage) => void;
+  onPreviewExecuted: (page: ExecutedSignaturePage) => void;
 }
 
 const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
@@ -22,8 +24,15 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
   allMatches,
   onConfirmMatch,
   onUnmatch,
+  onPreviewBlank,
+  onPreviewExecuted,
 }) => {
   const [selectedExecutedId, setSelectedExecutedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelectedExecutedId(currentMatch?.executedPageId ?? null);
+  }, [isOpen, currentMatch?.executedPageId]);
 
   if (!isOpen || !blankPage) return null;
 
@@ -82,12 +91,21 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
             <h4 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">
               Blank Signature Page
             </h4>
-            <div className="bg-slate-50 rounded-lg overflow-hidden flex-shrink-0 mb-3">
+            <div
+              className="bg-slate-50 rounded-lg overflow-hidden flex-shrink-0 mb-3 relative group cursor-pointer"
+              onClick={() => onPreviewBlank(blankPage)}
+              title="View full page"
+            >
               <img
                 src={blankPage.thumbnailUrl}
                 alt={`Blank page ${blankPage.pageNumber}`}
                 className="w-full h-48 object-contain p-2"
               />
+              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                <div className="opacity-0 group-hover:opacity-100 bg-white/90 text-xs px-2 py-1.5 rounded shadow text-slate-700 font-medium flex items-center gap-1.5">
+                  <Eye size={12} /> View PDF
+                </div>
+              </div>
             </div>
             <div className="space-y-2 text-sm">
               <div className="flex items-center gap-2">
@@ -119,8 +137,23 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
             {currentMatch && currentMatchedPage && (
               <div className="mt-4 pt-3 border-t border-slate-200">
                 <div className="text-xs font-medium text-green-600 mb-2">Currently matched to:</div>
-                <div className="bg-green-50 rounded-lg p-2 text-xs text-green-700">
-                  {currentMatchedPage.extractedPartyName} — {currentMatchedPage.sourceFileName} pg {currentMatchedPage.pageNumber}
+                <div
+                  className="bg-green-50 rounded-lg p-2 text-xs text-green-700 flex items-start gap-2"
+                  title="View currently matched page"
+                >
+                  <button
+                    onClick={() => onPreviewExecuted(currentMatchedPage)}
+                    className="w-14 h-16 shrink-0 rounded overflow-hidden border border-green-200 bg-white hover:ring-1 hover:ring-green-400 transition-all"
+                  >
+                    <img
+                      src={currentMatchedPage.thumbnailUrl}
+                      alt={`Matched page ${currentMatchedPage.pageNumber}`}
+                      className="w-full h-full object-contain"
+                    />
+                  </button>
+                  <div className="min-w-0">
+                    {currentMatchedPage.extractedPartyName} — {currentMatchedPage.sourceFileName} pg {currentMatchedPage.pageNumber}
+                  </div>
                 </div>
                 <button
                   onClick={handleUnmatch}
@@ -156,23 +189,31 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
                   const isSelected = selectedExecutedId === ep.id;
 
                   return (
-                    <button
+                    <div
                       key={ep.id}
                       onClick={() => setSelectedExecutedId(isSelected ? null : ep.id)}
-                      className={`w-full flex items-start gap-3 p-3 rounded-lg border text-left transition-colors ${
+                      className={`w-full flex items-start gap-3 p-3 rounded-lg border text-left transition-colors cursor-pointer ${
                         isSelected
                           ? 'border-blue-400 bg-blue-50 ring-1 ring-blue-400'
                           : 'border-slate-200 bg-white hover:bg-slate-50'
                       }`}
                     >
                       {/* Thumbnail */}
-                      <div className="w-20 h-24 flex-shrink-0 bg-slate-100 rounded overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onPreviewExecuted(ep);
+                        }}
+                        className="w-20 h-24 flex-shrink-0 bg-slate-100 rounded overflow-hidden border border-slate-200 hover:ring-1 hover:ring-blue-400 transition-all"
+                        title={`View page ${ep.pageNumber}`}
+                      >
                         <img
                           src={ep.thumbnailUrl}
                           alt={`Executed page ${ep.pageNumber}`}
                           className="w-full h-full object-contain"
                         />
-                      </div>
+                      </button>
 
                       {/* Info */}
                       <div className="flex-1 min-w-0">
@@ -191,10 +232,26 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
                       </div>
 
                       {/* Selection indicator */}
-                      {isSelected && (
-                        <CheckCircle2 size={20} className="text-blue-500 flex-shrink-0 mt-1" />
-                      )}
-                    </button>
+                      <div className="flex flex-col items-end gap-2 flex-shrink-0 mt-0.5">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedExecutedId(ep.id);
+                          }}
+                          className={`text-xs px-2 py-1 rounded border transition-colors ${
+                            isSelected
+                              ? 'bg-blue-600 text-white border-blue-600'
+                              : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+                          }`}
+                        >
+                          {isSelected ? 'Selected' : 'Select'}
+                        </button>
+                        {isSelected && (
+                          <CheckCircle2 size={20} className="text-blue-500" />
+                        )}
+                      </div>
+                    </div>
                   );
                 })}
               </div>

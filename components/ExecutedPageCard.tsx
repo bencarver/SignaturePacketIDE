@@ -1,14 +1,15 @@
 import React from 'react';
 import { ExecutedSignaturePage, AssemblyMatch } from '../types';
-import { CheckCircle2, AlertCircle, FileText, Users, UserPen, Briefcase } from 'lucide-react';
+import { CheckCircle2, AlertCircle, FileText, Users, UserPen, Briefcase, Eye } from 'lucide-react';
 
 interface ExecutedPageCardProps {
   page: ExecutedSignaturePage;
   match: AssemblyMatch | null;
   onUnmatch?: (executedPageId: string) => void;
+  onPreview?: (page: ExecutedSignaturePage) => void;
 }
 
-const ExecutedPageCard: React.FC<ExecutedPageCardProps> = ({ page, match, onUnmatch }) => {
+const ExecutedPageCard: React.FC<ExecutedPageCardProps> = ({ page, match, onUnmatch, onPreview }) => {
   const isMatched = !!match;
 
   return (
@@ -20,12 +21,22 @@ const ExecutedPageCard: React.FC<ExecutedPageCardProps> = ({ page, match, onUnma
           : 'border-slate-200 opacity-60'
     }`}>
       {/* Thumbnail */}
-      <div className="w-full sm:w-36 h-36 sm:h-auto bg-slate-100 flex-shrink-0 relative border-b sm:border-b-0 sm:border-r border-slate-200">
+      <div
+        className="w-full sm:w-36 h-36 sm:h-auto bg-slate-100 flex-shrink-0 relative border-b sm:border-b-0 sm:border-r border-slate-200 group"
+        onClick={onPreview ? () => onPreview(page) : undefined}
+      >
         <img
           src={page.thumbnailUrl}
           alt={`Executed page ${page.pageNumber}`}
-          className="w-full h-full object-contain p-1.5"
+          className={`w-full h-full object-contain p-1.5 ${onPreview ? 'cursor-pointer' : ''}`}
         />
+        {onPreview && (
+          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center pointer-events-none">
+            <div className="opacity-0 group-hover:opacity-100 bg-white/90 text-xs px-2 py-1.5 rounded shadow text-slate-700 font-medium flex items-center gap-1.5">
+              <Eye size={12} /> View PDF
+            </div>
+          </div>
+        )}
         <div className="absolute bottom-1.5 left-1.5 bg-slate-800/80 text-white text-xs px-1.5 py-0.5 rounded">
           Pg {page.pageNumber}
         </div>
