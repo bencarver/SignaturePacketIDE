@@ -159,6 +159,16 @@ describe('autoMatch', () => {
     expect(matches).toHaveLength(0);
   });
 
+  it('does not auto-match executed pages in excludedExecutedIds', () => {
+    const blank = makeBlank({ id: 'b1' });
+    const executed = makeExecuted({ id: 'e1' });
+    const matches = autoMatch([blank], [executed], [], new Set(['e1']));
+    expect(matches).toHaveLength(0);
+
+    const matches2 = autoMatch([blank], [executed], [], ['e1']);
+    expect(matches2).toHaveLength(0);
+  });
+
   it('does not preserve auto-matched entries from existingMatches (they are re-computed)', () => {
     const blank = makeBlank({ id: 'b1' });
     const executed = makeExecuted({ id: 'e1' });

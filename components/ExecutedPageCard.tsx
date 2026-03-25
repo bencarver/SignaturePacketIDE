@@ -7,9 +7,10 @@ interface ExecutedPageCardProps {
   match: AssemblyMatch | null;
   onUnmatch?: (executedPageId: string) => void;
   onPreview?: (page: ExecutedSignaturePage) => void;
+  onMatchNow?: (executedPageId: string) => void;
 }
 
-const ExecutedPageCard: React.FC<ExecutedPageCardProps> = ({ page, match, onUnmatch, onPreview }) => {
+const ExecutedPageCard: React.FC<ExecutedPageCardProps> = ({ page, match, onUnmatch, onPreview, onMatchNow }) => {
   const isMatched = !!match;
 
   return (
@@ -111,9 +112,20 @@ const ExecutedPageCard: React.FC<ExecutedPageCardProps> = ({ page, match, onUnma
         )}
 
         {!isMatched && page.isConfirmedExecuted && (
-          <div className="mt-auto pt-2 border-t border-slate-100 flex items-center gap-1.5 text-xs text-amber-600">
-            <AlertCircle size={14} />
-            <span>Awaiting match — assign manually or run auto-match</span>
+          <div className="mt-auto pt-2 border-t border-slate-100 flex items-center justify-between gap-2 text-xs text-amber-600">
+            <div className="flex items-center gap-1.5">
+              <AlertCircle size={14} />
+              <span>Awaiting match</span>
+            </div>
+            {onMatchNow && (
+              <button
+                onClick={() => onMatchNow(page.id)}
+                className="text-xs text-blue-600 hover:text-blue-800 font-medium transition-colors px-1.5 py-0.5"
+                title="Match this executed page now"
+              >
+                Match now
+              </button>
+            )}
           </div>
         )}
 

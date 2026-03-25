@@ -77,13 +77,20 @@ const MATCH_THRESHOLD = 0.4;
  * @param blankPages - The extracted blank signature pages from the original documents
  * @param executedPages - The uploaded executed (signed) signature pages
  * @param existingMatches - Any existing matches to preserve (user-confirmed or user-overridden)
+ * @param excludedExecutedIds - Executed pages to skip (e.g. user removed the auto-matched blank)
  * @returns New auto-matched AssemblyMatch entries (does not include preserved existing matches)
  */
 export const autoMatch = (
   blankPages: ExtractedSignaturePage[],
   executedPages: ExecutedSignaturePage[],
-  existingMatches: AssemblyMatch[] = []
+  existingMatches: AssemblyMatch[] = [],
+  excludedExecutedIds: ReadonlySet<string> | readonly string[] = []
 ): AssemblyMatch[] => {
+  const excluded =
+    excludedExecutedIds instanceof Set
+      ? excludedExecutedIds
+      : new Set(excludedExecutedIds);
+
   // Determine which blanks and executed pages are already matched
   // (preserve user-confirmed and user-overridden matches)
   const preservedMatches = existingMatches.filter(
@@ -95,7 +102,10 @@ export const autoMatch = (
   // Filter to only unmatched pages
   const availableBlanks = blankPages.filter(b => !usedBlankIds.has(b.id));
   const availableExecuted = executedPages.filter(
-    e => !usedExecutedIds.has(e.id) && e.isConfirmedExecuted
+    e =>
+      !usedExecutedIds.has(e.id) &&
+      e.isConfirmedExecuted &&
+      !excluded.has(e.id)
   );
 
   // Score all possible pairs

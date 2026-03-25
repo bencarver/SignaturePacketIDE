@@ -23,6 +23,13 @@ function allPageIndices(pageCount: number): number[] {
 }
 
 const FALLBACK_AI_PAGE_WARN_THRESHOLD = 60;
+
+/** Preview URLs may use `blob:…#page=N`; revoke must use the blob URL only. */
+function revokePreviewBlobUrl(url: string | null | undefined) {
+  if (!url) return;
+  URL.revokeObjectURL(url.split('#')[0]);
+}
+
 type SupportedSourceFormat = 'pdf' | 'docx';
 type NormalizedUpload = { sourceFile: File; pdfFile: File | null; errorMessage?: string };
 
@@ -40,6 +47,8 @@ const App: React.FC = () => {
   // Assembly State
   const [executedUploads, setExecutedUploads] = useState<ExecutedUpload[]>([]);
   const [assemblyMatches, setAssemblyMatches] = useState<AssemblyMatch[]>([]);
+  /** Executed pages that must not be auto-matched again after user removes an auto-match or deletes an auto-matched blank. Cleared when user manually matches that executed page. */
+  const [autoMatchExcludedExecutedIds, setAutoMatchExcludedExecutedIds] = useState<string[]>([]);
   const [isDraggingExecuted, setIsDraggingExecuted] = useState(false);
 
   // Match Picker Modal State
@@ -47,7 +56,35 @@ const App: React.FC = () => {
     isOpen: boolean;
     blankPageId: string | null;
     currentMatch: AssemblyMatch | null;
-  }>({ isOpen: false, blankPageId: null, currentMatch: null });
+    initialExecutedPageId: string | null;
+  }>({ isOpen: false, blankPageId: null, currentMatch: null, initialExecutedPageId: null });
+  const normalizeForMatch = (value: string | null | undefined): string =>
+    (value ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+
+  const pickBestBlankForExecuted = (executed: ExecutedSignaturePage): ExtractedSignaturePage | null => {
+    const matchedBlankIds = new Set(assemblyMatches.map(m => m.blankPageId));
+    const candidates = allPages.filter(p => !matchedBlankIds.has(p.id));
+    if (candidates.length === 0) return null;
+
+    const edoc = normalizeForMatch(executed.extractedDocumentName);
+    const eparty = normalizeForMatch(executed.extractedPartyName);
+    const esig = normalizeForMatch(executed.extractedSignatoryName);
+
+    const score = (blank: ExtractedSignaturePage): number => {
+      const bdoc = normalizeForMatch(blank.documentName);
+      const bparty = normalizeForMatch(blank.partyName);
+      const bsig = normalizeForMatch(blank.signatoryName);
+      let s = 0;
+      if (edoc && bdoc && (edoc === bdoc || edoc.includes(bdoc) || bdoc.includes(edoc))) s += 5;
+      if (eparty && bparty && (eparty === bparty || eparty.includes(bparty) || bparty.includes(eparty))) s += 3;
+      if (esig && bsig && (esig === bsig || esig.includes(bsig) || bsig.includes(esig))) s += 2;
+      return s;
+    };
+
+    const ranked = [...candidates].sort((a, b) => score(b) - score(a));
+    return ranked[0] ?? null;
+  };
+
 
   // Drag & Drop State
   const [isDragging, setIsDragging] = useState(false);
@@ -588,13 +625,29 @@ const App: React.FC = () => {
   };
 
   const handleDeletePage = (pageId: string) => {
-      setDocuments(prev => prev.map(doc => ({
-        ...doc,
-        extractedPages: doc.extractedPages.filter(p => p.id !== pageId)
-      })));
+    const match = assemblyMatches.find(m => m.blankPageId === pageId);
+    if (match?.status === 'auto-matched') {
+      setAutoMatchExcludedExecutedIds(prev =>
+        prev.includes(match.executedPageId) ? prev : [...prev, match.executedPageId]
+      );
+    }
+    setAssemblyMatches(prev => prev.filter(m => m.blankPageId !== pageId));
+    setDocuments(prev => prev.map(doc => ({
+      ...doc,
+      extractedPages: doc.extractedPages.filter(p => p.id !== pageId)
+    })));
   };
 
   const removeDocument = (docId: string) => {
+    const doc = documents.find(d => d.id === docId);
+    const blankIds = new Set(doc?.extractedPages.map(p => p.id) ?? []);
+    const toExclude = assemblyMatches
+      .filter(m => blankIds.has(m.blankPageId) && m.status === 'auto-matched')
+      .map(m => m.executedPageId);
+    if (toExclude.length > 0) {
+      setAutoMatchExcludedExecutedIds(prev => [...new Set([...prev, ...toExclude])]);
+    }
+    setAssemblyMatches(prev => prev.filter(m => !blankIds.has(m.blankPageId)));
     setDocuments(prev => prev.filter(d => d.id !== docId));
   };
 
@@ -934,7 +987,12 @@ const App: React.FC = () => {
   };
 
   const handleAutoMatch = () => {
-    const newMatches = autoMatch(allPages, allExecutedPages, assemblyMatches);
+    const newMatches = autoMatch(
+      allPages,
+      allExecutedPages,
+      assemblyMatches,
+      autoMatchExcludedExecutedIds
+    );
     if (newMatches.length === 0) {
       setCurrentStatus('No new matches found');
       setTimeout(() => setCurrentStatus(''), 2000);
@@ -963,13 +1021,26 @@ const App: React.FC = () => {
       const filtered = prev.filter(m => m.blankPageId !== blankPageId);
       return [...filtered, match];
     });
+    setAutoMatchExcludedExecutedIds(prev => prev.filter(id => id !== executedPageId));
   };
 
   const handleUnmatch = (blankPageId: string) => {
+    const match = assemblyMatches.find(m => m.blankPageId === blankPageId);
+    if (match?.status === 'auto-matched') {
+      setAutoMatchExcludedExecutedIds(prev =>
+        prev.includes(match.executedPageId) ? prev : [...prev, match.executedPageId]
+      );
+    }
     setAssemblyMatches(prev => prev.filter(m => m.blankPageId !== blankPageId));
   };
 
   const handleUnmatchByExecutedId = (executedPageId: string) => {
+    const match = assemblyMatches.find(m => m.executedPageId === executedPageId);
+    if (match?.status === 'auto-matched') {
+      setAutoMatchExcludedExecutedIds(prev =>
+        prev.includes(executedPageId) ? prev : [...prev, executedPageId]
+      );
+    }
     setAssemblyMatches(prev => prev.filter(m => m.executedPageId !== executedPageId));
   };
 
@@ -978,6 +1049,24 @@ const App: React.FC = () => {
       isOpen: true,
       blankPageId,
       currentMatch,
+      initialExecutedPageId: null,
+    });
+  };
+
+  const handleMatchFromExecutedCard = (executedPageId: string) => {
+    const executed = allExecutedPages.find(p => p.id === executedPageId);
+    if (!executed) return;
+    const targetBlank = pickBestBlankForExecuted(executed);
+    if (!targetBlank) {
+      setCurrentStatus('No unmatched blank signature pages available to match');
+      setTimeout(() => setCurrentStatus(''), 2500);
+      return;
+    }
+    setMatchPickerState({
+      isOpen: true,
+      blankPageId: targetBlank.id,
+      currentMatch: assemblyMatches.find(m => m.blankPageId === targetBlank.id) ?? null,
+      initialExecutedPageId: executedPageId,
     });
   };
 
@@ -996,6 +1085,7 @@ const App: React.FC = () => {
 
     setIsProcessing(true);
     setCurrentStatus('Assembling documents...');
+    let assemblyFailed = false;
 
     try {
       const assembledPdfs = await assembleAllDocuments(documents, assemblyMatches, executedUploads);
@@ -1014,11 +1104,15 @@ const App: React.FC = () => {
       setTimeout(() => URL.revokeObjectURL(url), 1000);
 
     } catch (e) {
+      assemblyFailed = true;
       console.error('Assembly error:', e);
-      alert('Failed to assemble documents');
+      const message = getErrorMessage(e, 'Failed to assemble documents');
+      setCurrentStatus(`Assembly failed: ${message}`);
+      setTimeout(() => setCurrentStatus(''), 8000);
+      alert(`Failed to assemble documents.\n\n${message}`);
     } finally {
       setIsProcessing(false);
-      setCurrentStatus('');
+      if (!assemblyFailed) setCurrentStatus('');
     }
   };
 
@@ -1041,9 +1135,7 @@ const App: React.FC = () => {
   };
 
   const closePreview = () => {
-    if (previewState.url) {
-      URL.revokeObjectURL(previewState.url);
-    }
+    revokePreviewBlobUrl(previewState.url);
     setPreviewState({ isOpen: false, url: null, title: '' });
   };
 
@@ -1054,12 +1146,12 @@ const App: React.FC = () => {
       if (e.key !== 'Escape') return;
       e.preventDefault();
       if (previewState.isOpen) {
-        if (previewState.url) URL.revokeObjectURL(previewState.url);
+        revokePreviewBlobUrl(previewState.url);
         setPreviewState({ isOpen: false, url: null, title: '' });
         return;
       }
       if (matchPickerState.isOpen) {
-        setMatchPickerState({ isOpen: false, blankPageId: null, currentMatch: null });
+        setMatchPickerState({ isOpen: false, blankPageId: null, currentMatch: null, initialExecutedPageId: null });
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -1079,12 +1171,16 @@ const App: React.FC = () => {
 
     try {
       const pdfBytes = await extractSinglePagePdf(parentDoc.file, page.pageIndex);
-      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       openPreview(url, `${page.documentName} - Page ${page.pageNumber}`);
     } catch (e) {
-      console.error("Preview error", e);
-      alert("Could not generate preview.");
+      const message = e instanceof Error ? e.message : String(e);
+      console.error('[Preview] Single-page extract failed (blank). Using full PDF + #page.', e);
+      const blobUrl = URL.createObjectURL(parentDoc.file);
+      openPreview(`${blobUrl}#page=${page.pageNumber}`, `${page.documentName} - Page ${page.pageNumber}`);
+      setCurrentStatus(`Preview: full document at page ${page.pageNumber} (extract: ${message})`);
+      setTimeout(() => setCurrentStatus(''), 7000);
     }
   };
 
@@ -1094,12 +1190,16 @@ const App: React.FC = () => {
 
     try {
       const pdfBytes = await extractSinglePagePdf(sourceUpload.file, page.pageIndexInSource);
-      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const blob = new Blob([pdfBytes as BlobPart], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       openPreview(url, `${page.sourceFileName} - Page ${page.pageNumber}`);
     } catch (e) {
-      console.error("Preview error", e);
-      alert("Could not generate preview.");
+      const message = e instanceof Error ? e.message : String(e);
+      console.error('[Preview] Single-page extract failed (executed). Using full PDF + #page.', e);
+      const blobUrl = URL.createObjectURL(sourceUpload.file);
+      openPreview(`${blobUrl}#page=${page.pageNumber}`, `${page.sourceFileName} - Page ${page.pageNumber}`);
+      setCurrentStatus(`Preview: full document at page ${page.pageNumber} (extract: ${message})`);
+      setTimeout(() => setCurrentStatus(''), 7000);
     }
   };
 
@@ -1299,9 +1399,10 @@ const App: React.FC = () => {
       {/* Match Picker Modal */}
       <MatchPickerModal
         isOpen={matchPickerState.isOpen}
-        onClose={() => setMatchPickerState({ isOpen: false, blankPageId: null, currentMatch: null })}
+        onClose={() => setMatchPickerState({ isOpen: false, blankPageId: null, currentMatch: null, initialExecutedPageId: null })}
         blankPage={allPages.find(p => p.id === matchPickerState.blankPageId) || null}
         currentMatch={matchPickerState.currentMatch}
+        initialExecutedPageId={matchPickerState.initialExecutedPageId}
         executedPages={allExecutedPages}
         allMatches={assemblyMatches}
         onConfirmMatch={handleManualMatch}
@@ -1817,6 +1918,7 @@ const App: React.FC = () => {
                            match={assemblyMatches.find(m => m.executedPageId === ep.id) || null}
                            onUnmatch={handleUnmatchByExecutedId}
                           onPreview={handlePreviewExecutedPage}
+                          onMatchNow={handleMatchFromExecutedCard}
                          />
                        ))}
                      </div>

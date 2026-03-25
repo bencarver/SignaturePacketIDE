@@ -7,6 +7,7 @@ interface MatchPickerModalProps {
   onClose: () => void;
   blankPage: ExtractedSignaturePage | null;
   currentMatch: AssemblyMatch | null;
+  initialExecutedPageId?: string | null;
   executedPages: ExecutedSignaturePage[];
   allMatches: AssemblyMatch[];
   onConfirmMatch: (blankPageId: string, executedPageId: string) => void;
@@ -20,6 +21,7 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
   onClose,
   blankPage,
   currentMatch,
+  initialExecutedPageId,
   executedPages,
   allMatches,
   onConfirmMatch,
@@ -31,8 +33,8 @@ const MatchPickerModal: React.FC<MatchPickerModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) return;
-    setSelectedExecutedId(currentMatch?.executedPageId ?? null);
-  }, [isOpen, currentMatch?.executedPageId]);
+    setSelectedExecutedId(currentMatch?.executedPageId ?? initialExecutedPageId ?? null);
+  }, [isOpen, currentMatch?.executedPageId, initialExecutedPageId]);
 
   if (!isOpen || !blankPage) return null;
 
